@@ -1,0 +1,27 @@
+# Secrets and local runtime config
+.env
+**/.env
+
+# Hoya local runtime state
+.hoya_*.json
+.hoya_*.jsonl
+imports/
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Temporary/imported local files
+_desktop_import/
+_tmp_desktop_docs/
+desktop_1*.docx
+.git_broken_*/
+
+# Local study assistant runtime artifacts
+local_ai_study_assistant/data/index.json
+local_ai_study_assistant/data/uploads/*
+!local_ai_study_assistant/data/uploads/.gitkeep
+local_ai_study_assistant/server.*.log

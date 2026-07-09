@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>本地文档 AI 学习助手</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <aside class="sidebar">
+          <div class="brand">
+            <div class="brand-mark">A</div>
+            <div>
+              <h1>AI 学习助手</h1>
+              <p>Local RAG Workspace</p>
+            </div>
+          </div>
+
+          <label class="upload-box" for="file-input">
+            <input id="file-input" type="file" accept=".txt,.md,.markdown,.docx,.pdf" />
+            <span class="upload-icon" aria-hidden="true">+</span>
+            <span class="upload-copy">
+              <strong>上传学习资料</strong>
+              <small>支持 txt、md、docx、pdf</small>
+            </span>
+          </label>
+
+          <button id="rebuild-btn" class="secondary-button" type="button">
+            <span aria-hidden="true">↻</span>
+            重建知识库
+          </button>
+
+          <div class="doc-panel">
+            <div class="panel-head">
+              <div>
+                <h2>文档库</h2>
+                <p>已入库资料</p>
+              </div>
+              <span id="doc-count">0</span>
+            </div>
+            <div id="doc-list" class="doc-list"></div>
+          </div>
+        </aside>
+
+        <section class="chat-area">
+          <header class="chat-header">
+            <div>
+              <p class="eyebrow">Document-grounded QA</p>
+              <h2>本地知识问答</h2>
+            </div>
+            <div class="status-pills">
+              <span>检索优先</span>
+              <span>来源可追溯</span>
+            </div>
+          </header>
+
+          <div id="messages" class="messages">
+            <article class="message assistant">
+              <div class="avatar">A</div>
+              <div class="bubble">
+                <p>准备好了。把资料放进左侧文档库后，就可以开始问问题。</p>
+              </div>
+            </article>
+          </div>
+
+          <div class="suggestions" aria-label="示例问题">
+            <button type="button" data-question="这份资料的核心内容是什么？">核心内容</button>
+            <button type="button" data-question="请整理这份资料的学习提纲">学习提纲</button>
+            <button type="button" data-question="有哪些需要重点复习的概念？">重点概念</button>
+          </div>
+
+          <form id="ask-form" class="ask-bar">
+            <div class="input-wrap">
+              <input
+                id="question-input"
+                type="text"
+                autocomplete="off"
+                placeholder="输入你的问题..."
+              />
+            </div>
+            <button type="submit" aria-label="发送问题">发送</button>
+          </form>
+        </section>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
