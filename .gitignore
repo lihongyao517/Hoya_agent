@@ -18,6 +18,9 @@ venv/
 _desktop_import/
 _tmp_desktop_docs/
 desktop_1*.docx
+
+# Claude config
+.claude/
 .git_broken_*/
 
 # Local study assistant runtime artifacts
