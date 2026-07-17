@@ -6,6 +6,12 @@ from .cli import main as cli_main
 
 
 def main() -> None:
+    if "--qq" in sys.argv:
+        from .qq_bridge import main as qq_main
+
+        qq_main()
+        return
+
     if "--tui" in sys.argv:
         try:
             from .tui import main as tui_main

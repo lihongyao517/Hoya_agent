@@ -3,15 +3,26 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from assistant.agent_tool import (
+    AgentRequestError,
+    build_agent_error_response,
+    build_agent_schema,
+    build_agent_success_response,
+    clamp_top_k,
+    parse_agent_ask_request,
+)
 from assistant.config import Settings
 from assistant.documents import DocumentParseError, load_document_text
 from assistant.knowledge_base import KnowledgeBase
 from assistant.llm_client import LLMClient
+from assistant.payment import create_payment_verifier, payment_result_to_public_dict
 from assistant.rag import build_answer
+from assistant.usage_log import append_usage_event, build_usage_event, new_request_id
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -23,6 +34,7 @@ INDEX_PATH = DATA_DIR / "index.json"
 settings = Settings.load(BASE_DIR / ".env")
 knowledge_base = KnowledgeBase(INDEX_PATH)
 llm_client = LLMClient(settings)
+payment_verifier = create_payment_verifier(settings)
 
 
 def json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
@@ -58,6 +70,9 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/documents":
             json_response(self, {"documents": knowledge_base.list_documents()})
             return
+        if parsed.path == "/api/agent/schema":
+            self.agent_schema()
+            return
         if parsed.path.startswith("/static/"):
             self.serve_file(WEB_DIR / parsed.path.lstrip("/"))
             return
@@ -72,13 +87,18 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/ask":
                 self.ask_question()
                 return
+            if parsed.path == "/api/agent/ask":
+                self.agent_ask_question()
+                return
             if parsed.path == "/api/rebuild":
                 self.rebuild_index()
                 return
         except json.JSONDecodeError:
             json_response(self, {"error": "请求 JSON 格式不正确"}, 400)
+            return
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
+            return
         self.send_error(404, "Not found")
 
     def upload_document(self) -> None:
@@ -100,30 +120,125 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
             return
 
         document = knowledge_base.add_document(filename=filename, path=file_path, text=text)
-        json_response(
-            self,
-            {
-                "message": "文档已入库",
-                "document": document.to_public_dict(),
-            },
-        )
+        json_response(self, {"message": "文档已入库", "document": document.to_public_dict()})
 
-    def ask_question(self) -> None:
-        payload = read_json(self)
-        question = str(payload.get("question", "")).strip()
-        top_k = int(payload.get("top_k", 5))
-        if not question:
-            json_response(self, {"error": "问题不能为空"}, 400)
-            return
-
+    def answer_question(self, question: str, top_k: int) -> dict:
         results = knowledge_base.search(question, top_k=top_k)
-        answer = build_answer(
+        return build_answer(
             question=question,
             search_results=results,
             llm_client=llm_client,
             max_context_chars=settings.max_context_chars,
         )
-        json_response(self, answer)
+
+    def ask_question(self) -> None:
+        payload = read_json(self)
+        question = str(payload.get("question", "")).strip()
+        top_k = clamp_top_k(payload.get("top_k"), settings.agent_default_top_k, settings.agent_max_top_k)
+        if not question:
+            json_response(self, {"error": "问题不能为空"}, 400)
+            return
+        json_response(self, self.answer_question(question, top_k))
+
+    def agent_schema(self) -> None:
+        if not self.agent_tool_available():
+            return
+        json_response(self, build_agent_schema(settings))
+
+    def agent_ask_question(self) -> None:
+        request_id = new_request_id()
+        started = time.monotonic()
+        if not self.agent_tool_available():
+            return
+
+        payload = read_json(self)
+        try:
+            agent_request = parse_agent_ask_request(payload, settings)
+        except AgentRequestError as exc:
+            self.write_agent_log(request_id, started, exc.status, error=exc.message)
+            json_response(self, build_agent_error_response(request_id, exc.code, exc.message), exc.status)
+            return
+
+        payment_result = payment_verifier.verify(self.headers, payload)
+        payment_payload = payment_result_to_public_dict(payment_result)
+        if not payment_result.ok:
+            self.write_agent_log(
+                request_id,
+                started,
+                402,
+                question=agent_request.question,
+                top_k=agent_request.top_k,
+                payment=payment_payload,
+                error=payment_result.error,
+            )
+            json_response(
+                self,
+                build_agent_error_response(
+                    request_id,
+                    "payment_required",
+                    payment_result.error or "Payment required to call this knowledge tool.",
+                    payment=payment_payload,
+                ),
+                402,
+            )
+            return
+
+        answer = self.answer_question(agent_request.question, agent_request.top_k)
+        response, source_count = build_agent_success_response(
+            request_id=request_id,
+            payment=payment_payload,
+            answer=answer,
+            include_sources=agent_request.include_sources,
+            paid=settings.payment_mode != "off",
+            top_k=agent_request.top_k,
+            question_chars=len(agent_request.question),
+        )
+        self.write_agent_log(
+            request_id,
+            started,
+            200,
+            question=agent_request.question,
+            top_k=agent_request.top_k,
+            payment=payment_payload,
+            mode=str(answer.get("mode", "")),
+            source_count=source_count,
+        )
+        json_response(self, response)
+
+    def agent_tool_available(self) -> bool:
+        if settings.agent_tool_enabled:
+            return True
+        self.send_error(404, "Not found")
+        return False
+
+    def write_agent_log(
+        self,
+        request_id: str,
+        started: float,
+        status: int,
+        question: str = "",
+        top_k: int | None = None,
+        payment: dict | None = None,
+        mode: str = "",
+        source_count: int = 0,
+        error: str | None = None,
+    ) -> None:
+        event = build_usage_event(
+            request_id=request_id,
+            endpoint=settings.payment_resource,
+            client_ip=self.client_address[0] if self.client_address else "",
+            user_agent=self.headers.get("User-Agent", ""),
+            question_chars=len(question),
+            top_k=top_k if top_k is not None else settings.agent_default_top_k,
+            payment=payment,
+            fallback_payment_mode=settings.payment_mode,
+            status=status,
+            latency_ms=round((time.monotonic() - started) * 1000),
+            mode=mode,
+            source_count=source_count,
+            error=error,
+        )
+        append_usage_event(settings.usage_log_path, event)
 
     def rebuild_index(self) -> None:
         rebuilt = 0
@@ -159,6 +274,7 @@ def main() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((settings.host, settings.port), StudyAssistantHandler)
     print(f"AI 学习助手已启动: http://{settings.host}:{settings.port}")
+    print(f"Agent paid endpoint: {settings.payment_resource} · payment={settings.payment_mode}")
     print("按 Ctrl+C 停止服务")
     server.serve_forever()
 

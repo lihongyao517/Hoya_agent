@@ -90,6 +90,29 @@ python -m hoya_agent
 python -m hoya_agent --tui
 ```
 
+### 6. 可选：启动 QQ 私聊桥接
+
+如果你使用 NapCatQQ、Lagrange.OneBot 等 OneBot 兼容 QQ Bot，可以让 Hoya 接收 QQ 私聊消息并回复：
+
+```powershell
+python -m hoya_agent --qq
+```
+
+然后在 QQ Bot 的反向 HTTP / webhook 配置里填：
+
+```text
+http://127.0.0.1:8765/onebot
+```
+
+当前 QQ 桥接只支持白名单 QQ 用户的私聊消息，不处理 QQ 群消息。建议 QQ 场景保持：
+
+```env
+HOYA_ALLOW_SHELL=0
+HOYA_REQUIRE_SHELL_APPROVAL=1
+HOYA_REQUIRE_WRITE_APPROVAL=1
+HOYA_ALLOW_DESKTOP=0
+```
+
 输入任务示例：
 
 ```text
@@ -102,6 +125,7 @@ python -m hoya_agent --tui
 | --- | --- | --- |
 | CLI | `python -m hoya_agent` | 简单对话、快速任务、终端环境 |
 | TUI | `python -m hoya_agent --tui` | 需要事件流、工具调用状态、快捷键、待审批写入管理的交互式任务 |
+| QQ 私聊桥接 | `python -m hoya_agent --qq` | 通过 OneBot 兼容 QQ Bot 私聊 Hoya 并发送任务 |
 
 TUI 本身依赖 Textual。如果提示未安装，请先执行：
 
@@ -150,6 +174,23 @@ TUI 本地命令：
 | `HOYA_HISTORY_ENTRY_MAX_CHARS` | `4000` | 每条历史最大注入字符数 |
 | `HOYA_TOOL_RESULT_MAX_CHARS` | `12000` | 工具结果回填模型前的最大字符数 |
 
+QQ 私聊桥接相关变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `HOYA_QQ_HOST` | `127.0.0.1` | QQ 桥接 HTTP 服务监听地址 |
+| `HOYA_QQ_PORT` | `8765` | QQ 桥接 HTTP 服务监听端口 |
+| `HOYA_QQ_WEBHOOK_PATH` | `/onebot` | OneBot 反向 HTTP 上报路径 |
+| `HOYA_QQ_WEBHOOK_TOKEN` | 空 | 入站 webhook 校验 token，必填 |
+| `HOYA_QQ_ALLOWED_USERS` | 空 | 允许私聊 Hoya 的 QQ 号，逗号分隔，必填 |
+| `HOYA_QQ_ONEBOT_API_URL` | 空 | OneBot HTTP API 地址，例如 `http://127.0.0.1:3000`，必填 |
+| `HOYA_QQ_ONEBOT_TOKEN` | 空 | OneBot HTTP API access token，可选但建议配置 |
+| `HOYA_QQ_MAX_MESSAGE_CHARS` | `4000` | 单条 QQ 输入最大字符数 |
+| `HOYA_QQ_REPLY_CHUNK_CHARS` | `1500` | QQ 回复分段字符数 |
+| `HOYA_QQ_QUEUE_SIZE` | `1` | 等待队列大小，默认一次只处理一个任务 |
+| `HOYA_QQ_REQUEST_TIMEOUT` | `10` | 调用 OneBot HTTP API 的超时时间（秒） |
+| `HOYA_QQ_SEND_STATUS` | `1` | 是否向 QQ 发送简短工具调用状态 |
+
 `.env.example` 示例：
 
 ```env
@@ -166,6 +207,19 @@ HOYA_MAX_STEPS=8
 HOYA_HISTORY_CONTEXT_LIMIT=12
 HOYA_HISTORY_ENTRY_MAX_CHARS=4000
 HOYA_TOOL_RESULT_MAX_CHARS=12000
+
+HOYA_QQ_HOST=127.0.0.1
+HOYA_QQ_PORT=8765
+HOYA_QQ_WEBHOOK_PATH=/onebot
+HOYA_QQ_WEBHOOK_TOKEN=replace_with_strong_random_token
+HOYA_QQ_ALLOWED_USERS=123456789
+HOYA_QQ_ONEBOT_API_URL=http://127.0.0.1:3000
+HOYA_QQ_ONEBOT_TOKEN=replace_with_onebot_access_token
+HOYA_QQ_MAX_MESSAGE_CHARS=4000
+HOYA_QQ_REPLY_CHUNK_CHARS=1500
+HOYA_QQ_QUEUE_SIZE=1
+HOYA_QQ_REQUEST_TIMEOUT=10
+HOYA_QQ_SEND_STATUS=1
 ```
 
 ## 工作方式建议
