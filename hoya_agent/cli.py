@@ -46,7 +46,9 @@ def print_intro(config: Config) -> None:
     print("Hoya")
     print("本地工作区 Agent · 输入任务开始，/exit 退出")
     print(f"workspace  {config.workspace}")
-    print(f"model      {config.model} · {config.wire_api}")
+    reasoning = "on" if config.show_reasoning else "off"
+    print(f"model      {config.provider} · {config.model} · {config.wire_api}")
+    print(f"reasoning  effort={config.reasoning_effort} summaries={reasoning}")
     print(f"tools      shell={shell} desktop={desktop}")
     print(RULE)
 
@@ -85,11 +87,19 @@ def main() -> None:
         try:
             for event in agent.run_stream(task):
                 event_type = event.get("type")
-                if event_type in {"status", "tool_start", "tool_result", "error", "done"}:
+                if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "error", "done"}:
                     run_log.append({"type": "agent_event", "event": event, "ui": "cli"})
 
                 if event_type == "status":
                     print(f"\n[status] {event.get('text', '运行中')}")
+                    continue
+
+                if event_type == "reasoning":
+                    print(f"\n[reasoning summary] {event.get('text', '')}")
+                    continue
+
+                if event_type == "approval_required":
+                    print(f"\n[approval required] {event.get('text', 'Operation pending approval')} id={event.get('id', '')}")
                     continue
 
                 if event_type == "tool_start":

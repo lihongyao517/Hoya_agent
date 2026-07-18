@@ -32,8 +32,9 @@ from .config import Config
 from .workspace_ops import (
     HistoryStore,
     RunLog,
-    apply_pending_write,
+    apply_pending_operation,
     build_index,
+    deny_pending_operation,
     import_path,
     load_pending_writes,
     search_index,
@@ -305,11 +306,13 @@ class HoyaAgentApp(App[None]):
         desktop = "on" if self.config.allow_desktop else "off"
         model = self.shorten(self.config.model, 24 if self.narrow else 36)
         workspace = self.shorten(str(self.config.workspace), 28)
+        provider = self.shorten(self.config.provider, 18)
         if self.narrow:
-            return f"{state} | {model} | tools:{self.tool_count}"
+            return f"{state} | {provider} | {model} | tools:{self.tool_count}"
+        reasoning = "on" if self.config.show_reasoning else "off"
         if self.compact:
-            return f"{state} | {model} | tools:{self.tool_count} | shell:{shell} desktop:{desktop}"
-        return f"{state} | {model} | {self.config.wire_api} | {workspace} | shell:{shell} desktop:{desktop}"
+            return f"{state} | {provider} | {model} | tools:{self.tool_count} | reasoning:{self.config.reasoning_effort}/{reasoning} | shell:{shell} desktop:{desktop}"
+        return f"{state} | {provider} | {model} | {self.config.wire_api} | {workspace} | reasoning:{self.config.reasoning_effort}/{reasoning} | shell:{shell} desktop:{desktop}"
 
     def action_clear_messages(self) -> None:
         self.query_one("#messages", VerticalScroll).remove_children()
@@ -393,6 +396,17 @@ class HoyaAgentApp(App[None]):
             self.set_activity("正在生成回答")
             return
 
+        if event_type == "reasoning":
+            text = str(event.get("text", ""))
+            self.add_event("reasoning", f"公开推理摘要: {text}", css_class="status")
+            return
+
+        if event_type == "approval_required":
+            text = str(event.get("text", "操作等待用户审批。"))
+            pending_id = str(event.get("id", ""))
+            self.add_event("approval", f"{text} id={pending_id}", css_class="tool")
+            return
+
         if event_type == "tool_start":
             self.tool_count += 1
             self.refresh_status("调用工具")
@@ -452,8 +466,9 @@ class HoyaAgentApp(App[None]):
                 "/index 建立工作区索引\n"
                 "/search <关键词> 搜索索引\n"
                 "/history [数量] 查看最近对话\n"
-                "/pending 查看待审批写入\n"
-                "/apply <id> 应用待审批写入\n"
+                "/pending 查看待审批操作\n"
+                "/apply <id> 批准/执行待审批操作\n"
+                "/deny <id> 拒绝待审批操作\n"
                 "/tools 切换工具输出详情折叠/展开\n"
                 "/clear 清空界面",
                 "system",
@@ -513,13 +528,16 @@ class HoyaAgentApp(App[None]):
         if name == "/pending":
             entries = load_pending_writes(self.config.pending_writes_path)
             if not entries:
-                self.add_message("system", "没有待审批写入。", "system")
+                self.add_message("system", "没有待审批操作。", "system")
                 return
             lines = []
             for entry in entries:
+                operation = entry.get("operation", "write_file")
+                target = entry.get("command") if operation == "run_powershell" else entry.get("path")
+                risk = entry.get("risk") or {}
                 diff = entry.get("diff", "")
                 diff_preview = diff[:800] + ("..." if len(diff) > 800 else "")
-                lines.append(f"id={entry.get('id')} path={entry.get('path')}\n{diff_preview}")
+                lines.append(f"id={entry.get('id')} op={operation} target={target} risk={risk.get('level', 'unknown')}\n{diff_preview}")
             self.add_message("system", "\n\n".join(lines), "tool")
             return
 
@@ -527,9 +545,26 @@ class HoyaAgentApp(App[None]):
             if not arg:
                 self.add_message("system", "用法：/apply <id>", "error")
                 return
-            result = apply_pending_write(self.config.workspace, self.config.pending_writes_path, arg)
+            result = apply_pending_operation(
+                self.config.workspace,
+                self.config.pending_writes_path,
+                arg,
+                allow_shell=self.config.allow_shell,
+            )
             if result.get("ok"):
-                self.add_message("system", f"已应用写入: {result['path']}", "system")
+                label = result.get("path") or f"shell returncode={result.get('returncode')}"
+                self.add_message("system", f"已批准并执行: {label}", "system")
+            else:
+                self.add_message("system", str(result.get("error")), "error")
+            return
+
+        if name == "/deny":
+            if not arg:
+                self.add_message("system", "用法：/deny <id>", "error")
+                return
+            result = deny_pending_operation(self.config.pending_writes_path, arg)
+            if result.get("ok"):
+                self.add_message("system", f"已拒绝待审批操作: {arg}", "system")
             else:
                 self.add_message("system", str(result.get("error")), "error")
             return

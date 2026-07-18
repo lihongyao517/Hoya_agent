@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -170,29 +171,111 @@ def load_pending_writes(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        entries = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return []
+    if not isinstance(entries, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        item.setdefault("operation", "write_file")
+        normalized.append(item)
+    return normalized
 
 
-def apply_pending_write(workspace: Path, pending_path: Path, pending_id: str) -> dict[str, Any]:
-    entries = load_pending_writes(pending_path)
-    remaining = []
+def _save_pending_writes(path: Path, entries: list[dict[str, Any]]) -> None:
+    path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _split_pending(entries: list[dict[str, Any]], pending_id: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     selected: dict[str, Any] | None = None
+    remaining: list[dict[str, Any]] = []
     for entry in entries:
         if entry.get("id") == pending_id:
             selected = entry
         else:
             remaining.append(entry)
+    return selected, remaining
+
+
+def _workspace_target(workspace: Path, relative_path: str) -> Path:
+    root = workspace.resolve()
+    target = (root / str(relative_path).strip().replace("\\", "/")).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError("pending operation target is outside workspace")
+    return target
+
+
+def apply_pending_operation(
+    workspace: Path,
+    pending_path: Path,
+    pending_id: str,
+    *,
+    allow_shell: bool = False,
+) -> dict[str, Any]:
+    from .tools import assess_shell_risk, assess_write_risk
+
+    entries = load_pending_writes(pending_path)
+    selected, remaining = _split_pending(entries, pending_id)
 
     if selected is None:
-        return {"ok": False, "error": f"pending write not found: {pending_id}"}
+        return {"ok": False, "error": f"pending operation not found: {pending_id}"}
 
-    target = (workspace / selected["path"]).resolve()
-    if target != workspace and workspace not in target.parents:
-        return {"ok": False, "error": "pending write target is outside workspace"}
+    operation = selected.get("operation", "write_file")
+    root = workspace.resolve()
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(selected.get("content", ""), encoding="utf-8")
-    pending_path.write_text(json.dumps(remaining, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"ok": True, "path": str(target.relative_to(workspace)), "id": pending_id}
+    if operation == "write_file":
+        target = _workspace_target(root, str(selected.get("path", "")))
+        content = str(selected.get("content", ""))
+        relative = str(target.relative_to(root))
+        risk = assess_write_risk(relative, content, target.exists())
+        if not risk.get("allowed", False):
+            return {"ok": False, "error": "pending write rejected by risk check", "risk": risk}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        _save_pending_writes(pending_path, remaining)
+        return {"ok": True, "operation": operation, "path": relative, "id": pending_id, "risk": risk}
+
+    if operation == "run_powershell":
+        if not allow_shell:
+            return {"ok": False, "error": "shell execution is disabled"}
+        command = str(selected.get("command", ""))
+        risk = assess_shell_risk(command)
+        if not risk.get("allowed", False):
+            return {"ok": False, "error": "pending shell command rejected by risk check", "risk": risk}
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=int(selected.get("timeout_seconds", 30)),
+            check=False,
+        )
+        _save_pending_writes(pending_path, remaining)
+        return {
+            "ok": True,
+            "operation": operation,
+            "id": pending_id,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout[-12000:],
+            "stderr": completed.stderr[-12000:],
+            "risk": risk,
+        }
+
+    return {"ok": False, "error": f"unknown pending operation: {operation}"}
+
+
+def apply_pending_write(workspace: Path, pending_path: Path, pending_id: str) -> dict[str, Any]:
+    return apply_pending_operation(workspace, pending_path, pending_id)
+
+
+def deny_pending_operation(pending_path: Path, pending_id: str) -> dict[str, Any]:
+    entries = load_pending_writes(pending_path)
+    selected, remaining = _split_pending(entries, pending_id)
+    if selected is None:
+        return {"ok": False, "error": f"pending operation not found: {pending_id}"}
+    _save_pending_writes(pending_path, remaining)
+    return {"ok": True, "id": pending_id, "operation": selected.get("operation", "write_file")}

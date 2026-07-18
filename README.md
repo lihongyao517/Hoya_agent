@@ -2,7 +2,7 @@
 
 一个本地 AI Agent MVP，目标是高效率、高精确度地完成你给出的本地工作区任务。
 
-它默认使用 OpenAI-compatible 的中转站接口，只需要配置 `HOYA_BASE_URL`、`HOYA_API_KEY` 和 `HOYA_MODEL`。项目提供命令行 CLI 和 Textual TUI 两种入口，支持读取文件、搜索、写入、建立索引、记录历史、可选执行 PowerShell 命令等能力。
+它支持 OpenAI-compatible 的中转站接口，也支持通过 Ollama 使用本地部署模型。OpenAI-compatible 模式配置 `HOYA_BASE_URL`、`HOYA_API_KEY` 和 `HOYA_MODEL`；Ollama 模式配置本地 `http://127.0.0.1:11434/v1` endpoint 和已安装模型名即可。项目提供命令行 CLI、Textual TUI、Electron + React 桌面端和本地 HTTP 后端服务，支持读取文件、搜索、写入、建立索引、记录历史、可选执行 PowerShell 命令等能力。
 
 ## 产品定位与适用边界
 
@@ -18,6 +18,7 @@ Hoya Agent 当前更适合作为“本地工作区任务助手”MVP：让模型
 
 - 对话式任务输入。
 - OpenAI-compatible Chat Completions / Responses 调用。
+- Ollama 本地模型模式，使用本地 OpenAI-compatible `/v1/chat/completions` endpoint。
 - 工具调用：
   - 查看工作区文件。
   - 读取文件。
@@ -39,15 +40,17 @@ Hoya Agent 当前更适合作为“本地工作区任务助手”MVP：让模型
 | --- | --- |
 | 语言 | Python |
 | TUI | Textual |
+| 桌面端 | Electron + React + Vite |
 | 文档解析 | pypdf，以及项目内置的 docx/xlsx/pdf 读取逻辑 |
-| 模型接口 | OpenAI-compatible Chat Completions / Responses |
+| 模型接口 | OpenAI-compatible Chat Completions / Responses；Ollama 本地 OpenAI-compatible endpoint |
 | 数据存储 | 本地 JSON / JSONL 历史、记忆、索引和待审批写入 |
 
 ## 环境要求
 
 - Python 3.10 或更高版本。
-- 一个可用的 OpenAI-compatible 模型中转站或模型服务。
+- 一个可用的 OpenAI-compatible 模型中转站，或本地 Ollama 服务。
 - Windows PowerShell 环境（Shell 工具按 PowerShell 场景设计）。
+- 桌面端开发需要 Node.js 18+ 和 npm。
 
 ## 快速开始
 
@@ -63,6 +66,8 @@ python -m pip install -r requirements.txt
 - `textual>=0.80`：TUI 界面。
 - `pypdf>=4.0`：PDF 文档读取。
 
+桌面端依赖在 `desktop/package.json` 中，由 npm 管理。
+
 ### 2. 复制环境变量示例
 
 ```powershell
@@ -71,12 +76,32 @@ Copy-Item .env.example .env
 
 ### 3. 编辑 `.env`
 
+OpenAI-compatible 中转站示例：
+
 ```env
+HOYA_LLM_PROVIDER=openai-compatible
 HOYA_API_KEY=你的中转站key
 HOYA_BASE_URL=https://你的中转站API地址/v1
 HOYA_MODEL=你的模型名
 HOYA_WIRE_API=chat
 ```
+
+Ollama 本地模型示例：
+
+```powershell
+ollama pull qwen2.5-coder:7b
+ollama serve
+```
+
+```env
+HOYA_LLM_PROVIDER=ollama
+HOYA_API_KEY=
+HOYA_BASE_URL=http://127.0.0.1:11434/v1
+HOYA_MODEL=qwen2.5-coder:7b
+HOYA_WIRE_API=chat
+```
+
+Ollama 模式使用 `/v1/chat/completions`，不是直接调用 `/api/chat`。
 
 ### 4. 启动 CLI
 
@@ -90,7 +115,38 @@ python -m hoya_agent
 python -m hoya_agent --tui
 ```
 
-### 6. 可选：启动 QQ 私聊桥接
+### 6. 启动本地 HTTP 后端
+
+桌面端会通过本地 HTTP 服务调用 Python agent 后端。也可以单独启动服务便于调试：
+
+```powershell
+python -m hoya_agent --server --host 127.0.0.1 --port 8787
+```
+
+### 7. 启动 Electron 桌面端
+
+开发模式：
+
+```powershell
+cd desktop
+npm install
+npm run dev
+```
+
+Electron 主进程会自动启动 `python -m hoya_agent --server` 子进程；React 前端通过 `http://127.0.0.1:8787` 调用 agent。
+
+构建真正桌面应用：
+
+```powershell
+.\build_backend.ps1
+cd desktop
+npm install
+npm run dist
+```
+
+`npm run dist` 会通过 electron-builder 生成 Windows 安装包和 portable 程序。安装包会创建桌面快捷方式和开始菜单快捷方式，指向真正的 Hoya Agent 桌面 App，而不是开发脚本。
+
+### 8. 可选：启动 QQ 私聊桥接
 
 如果你使用 NapCatQQ、Lagrange.OneBot 等 OneBot 兼容 QQ Bot，可以让 Hoya 接收 QQ 私聊消息并回复：
 
@@ -125,6 +181,8 @@ HOYA_ALLOW_DESKTOP=0
 | --- | --- | --- |
 | CLI | `python -m hoya_agent` | 简单对话、快速任务、终端环境 |
 | TUI | `python -m hoya_agent --tui` | 需要事件流、工具调用状态、快捷键、待审批写入管理的交互式任务 |
+| 本地 HTTP 后端 | `python -m hoya_agent --server` | Electron 桌面端、调试或其他本地客户端调用 Python agent |
+| Electron 桌面端 | `cd desktop && npm run dev` / `npm run dist` | 需要窗口化聊天、工作区选择、工具事件面板、索引/搜索和待审批写入管理的本地桌面使用 |
 | QQ 私聊桥接 | `python -m hoya_agent --qq` | 通过 OneBot 兼容 QQ Bot 私聊 Hoya 并发送任务 |
 
 TUI 本身依赖 Textual。如果提示未安装，请先执行：
@@ -132,6 +190,17 @@ TUI 本身依赖 Textual。如果提示未安装，请先执行：
 ```powershell
 python -m pip install -r requirements.txt
 ```
+
+Electron 桌面端依赖 Node.js/npm，首次运行前在 `desktop/` 下执行 `npm install`。
+
+## 桌面端支持能力
+
+- 原生窗口化聊天界面，复用 `HoyaAgent.run_stream()` 的流式事件。
+- 可选择并记住工作区；从该工作区读取 `.env`、历史、记忆、索引和待审批写入。
+- 顶部/侧边状态展示当前模型、接口类型、Shell 权限、桌面写入权限、写入审批和 Shell 审批状态。
+- 工具调用活动面板：显示状态、工具名和参数预览；工具结果默认折叠，可切换后续工具结果详情。
+- 工作区操作按钮：导入文件或目录、建立索引、搜索索引、查看历史、刷新并应用待审批写入。
+- 输入框支持 Enter 发送、Shift+Enter 换行。
 
 ## Textual TUI 支持能力
 
@@ -160,10 +229,11 @@ TUI 本地命令：
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `HOYA_API_KEY` | 空 | 模型服务 API Key，必填 |
-| `HOYA_BASE_URL` | 空 | API 地址，可填 `/v1`、完整 `/v1/chat/completions` 或完整 `/v1/responses` |
-| `HOYA_MODEL` | 空 | 模型名，必填 |
-| `HOYA_WIRE_API` | `chat` | 接口类型：`chat` 或 `responses` |
+| `HOYA_LLM_PROVIDER` | `openai-compatible` | 模型来源：`openai-compatible` 或 `ollama` |
+| `HOYA_API_KEY` | 空 | OpenAI-compatible 模式必填；Ollama 模式可为空 |
+| `HOYA_BASE_URL` | 空 | API 地址，可填 `/v1`、完整 `/v1/chat/completions` 或完整 `/v1/responses`；Ollama 通常为 `http://127.0.0.1:11434/v1` |
+| `HOYA_MODEL` | 空 | 模型名，OpenAI-compatible 模式必填；Ollama 为空时默认 `qwen2.5-coder:7b` |
+| `HOYA_WIRE_API` | `chat` | 接口类型：`chat` 或 `responses`；Ollama 固定为 `chat` |
 | `HOYA_ALLOW_SHELL` | `0` | 是否允许 Agent 执行 PowerShell 命令 |
 | `HOYA_REQUIRE_SHELL_APPROVAL` | `1` | Shell 命令是否需要人工审批 |
 | `HOYA_REQUIRE_WRITE_APPROVAL` | `0` | 写文件前是否先进入待审批 diff 队列 |
@@ -194,10 +264,18 @@ QQ 私聊桥接相关变量：
 `.env.example` 示例：
 
 ```env
+HOYA_LLM_PROVIDER=openai-compatible
 HOYA_API_KEY=replace_with_your_api_key
 HOYA_BASE_URL=https://your-relay.example.com/v1
 HOYA_MODEL=gpt-4o-mini
 HOYA_WIRE_API=chat
+
+# Ollama local example:
+# HOYA_LLM_PROVIDER=ollama
+# HOYA_API_KEY=
+# HOYA_BASE_URL=http://127.0.0.1:11434/v1
+# HOYA_MODEL=qwen2.5-coder:7b
+# HOYA_WIRE_API=chat
 HOYA_ALLOW_SHELL=0
 HOYA_REQUIRE_SHELL_APPROVAL=1
 HOYA_REQUIRE_WRITE_APPROVAL=0
@@ -226,7 +304,7 @@ HOYA_QQ_SEND_STATUS=1
 
 当需求比较模糊时，Agent 应先用产品经理方式收敛问题：明确目标用户、成功标准、输入输出、风险边界和最小可交付结果。复杂任务应先给出简短计划，再读取文件、写入文件或运行检查。
 
-CLI 和 TUI 都会写入：
+CLI、TUI 和桌面端都会写入：
 
 | 文件 | 说明 |
 | --- | --- |
@@ -275,14 +353,14 @@ HOYA_REQUIRE_SHELL_APPROVAL=0
 HOYA_REQUIRE_WRITE_APPROVAL=1
 ```
 
-之后在 TUI 里用：
+之后可以在 TUI 里用：
 
 ```text
 /pending
 /apply <id>
 ```
 
-这样可以先人工查看 diff，再决定是否应用。
+也可以在桌面端的“待审批”面板里刷新并应用写入。这样可以先人工查看 diff，再决定是否应用。
 
 ## 可选：允许在桌面创建 txt
 
@@ -292,9 +370,11 @@ HOYA_REQUIRE_WRITE_APPROVAL=1
 HOYA_ALLOW_DESKTOP=1
 ```
 
-## 中转站要求
+## 模型服务要求
 
-默认中转站走 OpenAI Chat Completions：
+### OpenAI-compatible 中转站
+
+OpenAI-compatible 模式走 Chat Completions：
 
 ```text
 POST {HOYA_BASE_URL}/chat/completions
@@ -332,6 +412,28 @@ HOYA_BASE_URL=https://你的中转站API地址/v1/responses
 HOYA_WIRE_API=responses
 ```
 
+### Ollama 本地模型
+
+Ollama 模式使用 Ollama 的 OpenAI-compatible endpoint：
+
+```text
+POST http://127.0.0.1:11434/v1/chat/completions
+```
+
+示例配置：
+
+```env
+HOYA_LLM_PROVIDER=ollama
+HOYA_API_KEY=
+HOYA_BASE_URL=http://127.0.0.1:11434/v1
+HOYA_MODEL=qwen2.5-coder:7b
+HOYA_WIRE_API=chat
+```
+
+Ollama 模式不会发送 `Authorization` 请求头。`HOYA_WIRE_API` 会固定为 `chat`，即使 `.env` 里写了 `responses` 也会按 `chat` 运行。
+
+注意：Hoya Agent 依赖 OpenAI-compatible tool/function calling。部分 Ollama 模型可以聊天，但工具调用不稳定，可能影响读取、搜索、写入等 Agent 能力。建议升级 Ollama，并使用支持工具调用的代码模型。
+
 ## 子项目：本地文档 AI 学习助手
 
 仓库内还包含一个独立的 RAG 学习助手项目：
@@ -351,11 +453,13 @@ local_ai_study_assistant/README.md
 ```text
 Hoya_agent/
 ├── hoya_agent/
-│   ├── __main__.py             # CLI / TUI 入口选择
+│   ├── __main__.py             # CLI / TUI / QQ / server 入口选择
 │   ├── cli.py                  # 命令行入口
 │   ├── config.py               # HOYA_* 配置读取
+│   ├── server.py               # Electron 调用的本地 HTTP 后端
 │   ├── tui.py                  # Textual TUI
 │   └── ...                     # 工具、模型客户端、历史、索引等模块
+├── desktop/                    # Electron + React 桌面端
 ├── local_ai_study_assistant/   # 独立 RAG 学习助手
 ├── .env.example
 ├── requirements.txt
@@ -377,15 +481,40 @@ Hoya_agent/
 
 ### 提示缺少 `HOYA_API_KEY` / `HOYA_BASE_URL` / `HOYA_MODEL`
 
-请复制 `.env.example` 为 `.env`，并填写三个必需变量。
+OpenAI-compatible 模式需要填写 API key、base URL 和 model。请复制 `.env.example` 为 `.env`，并填写必需变量。
+
+如果你使用 Ollama，请设置：
+
+```env
+HOYA_LLM_PROVIDER=ollama
+HOYA_API_KEY=
+HOYA_BASE_URL=http://127.0.0.1:11434/v1
+HOYA_MODEL=qwen2.5-coder:7b
+HOYA_WIRE_API=chat
+```
 
 ### 返回内容是 HTML 或 `<!doctype html>`
 
 通常是 `HOYA_BASE_URL` 填成了中转站网页后台地址，而不是 API 地址。请改成 `/v1`、`/v1/chat/completions` 或 `/v1/responses` 形式的接口地址。
 
+### Ollama 连接失败怎么办？
+
+先确认 Ollama 已启动并已拉取模型：
+
+```powershell
+ollama pull qwen2.5-coder:7b
+ollama serve
+```
+
+如果 `ollama serve` 提示端口已被占用，通常说明服务已经在运行。也可以直接检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:11434/api/tags
+```
+
 ### 模型不支持工具调用怎么办？
 
-请换用支持 OpenAI-compatible tool/function calling 的模型或中转站配置。否则 Agent 可能无法稳定调用读取、搜索、写入等工具。
+请换用支持 OpenAI-compatible tool/function calling 的模型或中转站配置。否则 Agent 可能无法稳定调用读取、搜索、写入等工具。Ollama 场景下尤其要注意：能正常聊天不代表一定能稳定执行工具调用。
 
 ### 为什么不能执行命令？
 

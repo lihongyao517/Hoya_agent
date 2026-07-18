@@ -33,5 +33,10 @@ class MemoryStore:
         self.path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
         return entry
 
+    def delete(self, created_at: str) -> None:
+        entries = [entry for entry in self.load() if str(entry.get("created_at", "")) != created_at]
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def recent(self, limit: int = 8) -> list[dict[str, Any]]:
         return self.load()[-limit:]

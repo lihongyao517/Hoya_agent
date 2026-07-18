@@ -12,7 +12,9 @@ class LLMClient:
     api_key: str
     base_url: str
     model: str
+    provider: str = "openai-compatible"
     wire_api: str = "chat"
+    reasoning_effort: str = "medium"
     temperature: float = 0.2
     timeout: int = 90
 
@@ -57,6 +59,16 @@ class LLMClient:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        effort_map = {
+            "minimal": "low",
+            "standard": "medium",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "high",
+            "max": "high",
+        }
+        payload["reasoning"] = {"effort": effort_map.get(self.reasoning_effort, "medium")}
         if tools:
             payload["tools"] = [self._responses_tool(tool) for tool in tools]
             payload["tool_choice"] = "auto"
@@ -101,14 +113,17 @@ class LLMClient:
             "parameters": function.get("parameters", {"type": "object", "properties": {}}),
         }
 
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key and self.provider != "ollama":
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
     def _request(self, payload: dict[str, Any]) -> urllib.request.Request:
         return urllib.request.Request(
             url=self.endpoint_url(),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=self._headers(),
             method="POST",
         )
 
@@ -133,10 +148,7 @@ class LLMClient:
         request = urllib.request.Request(
             url=self.endpoint_url(),
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=self._headers(),
             method="POST",
         )
 

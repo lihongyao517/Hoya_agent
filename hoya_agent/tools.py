@@ -5,6 +5,7 @@ import os
 import subprocess
 import uuid
 import zipfile
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -69,6 +70,9 @@ class Workspace:
             raise ValueError(f"Path is outside workspace: {relative_path}")
         return target
 
+    def relative(self, path: Path) -> str:
+        return str(path.resolve().relative_to(self.root))
+
 
 def _should_skip_workspace_path(root: Path, path: Path) -> bool:
     relative_parts = path.relative_to(root).parts
@@ -92,6 +96,58 @@ def _load_json_list(path: Path) -> list[dict[str, Any]]:
 
 def _save_json_list(path: Path, entries: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+DANGEROUS_SHELL_TOKENS = (
+    "remove-item",
+    "rm ",
+    "rmdir",
+    "del ",
+    "format",
+    "reg ",
+    "regedit",
+    "set-executionpolicy",
+    "invoke-webrequest",
+    "iwr ",
+    "curl ",
+    "wget ",
+    "start-process",
+    "schtasks",
+    "net user",
+    "icacls",
+    "takeown",
+)
+
+
+def assess_shell_risk(command: str) -> dict[str, Any]:
+    lowered = f" {command.lower()} "
+    hits = [token.strip() for token in DANGEROUS_SHELL_TOKENS if token in lowered]
+    if hits:
+        return {
+            "level": "high",
+            "allowed": False,
+            "reasons": [f"dangerous token: {token}" for token in hits],
+        }
+    if any(token in command for token in ["..", "; cd", "Set-Location", "Push-Location"]):
+        return {
+            "level": "medium",
+            "allowed": False,
+            "reasons": ["command attempts to change or escape the workspace"],
+        }
+    return {"level": "low", "allowed": True, "reasons": ["workspace-scoped command with no blocked tokens detected"]}
+
+
+def assess_write_risk(relative_path: str, content: str, exists: bool) -> dict[str, Any]:
+    reasons: list[str] = []
+    suffix = Path(relative_path).suffix.lower()
+    if suffix in {".exe", ".dll", ".ps1", ".bat", ".cmd", ".reg"}:
+        reasons.append(f"sensitive executable/script extension: {suffix}")
+    if len(content) > 500_000:
+        reasons.append("large write over 500KB")
+    if exists:
+        reasons.append("overwrites an existing file")
+    level = "medium" if reasons else "low"
+    return {"level": level, "allowed": True, "reasons": reasons or ["workspace path guard passed"]}
 
 
 def _extract_docx(path: Path) -> str:
@@ -168,21 +224,22 @@ def build_tools(
                 break
             if _should_skip_workspace_path(ws.root, path):
                 continue
-            files.append(str(path.relative_to(ws.root)))
+            files.append(ws.relative(path))
         return {"files": files, "truncated": len(files) >= max_files}
 
     def read_file(args: dict[str, Any]) -> Any:
         path = ws.resolve(args["path"])
+        relative = ws.relative(path)
         max_chars = int(args.get("max_chars", 20000))
         if not path.exists():
             return {"error": "file does not exist", "path": args["path"]}
         if path.is_dir():
-            return {"error": "path is a directory; use list_files to inspect it", "path": str(path.relative_to(ws.root))}
+            return {"error": "path is a directory; use list_files to inspect it", "path": relative}
         if not path.is_file():
-            return {"error": "path is not a regular file", "path": str(path.relative_to(ws.root))}
+            return {"error": "path is not a regular file", "path": relative}
         text = path.read_text(encoding="utf-8", errors="replace")
         return {
-            "path": str(path.relative_to(ws.root)),
+            "path": relative,
             "content": text[:max_chars],
             "truncated": len(text) > max_chars,
         }
@@ -190,14 +247,16 @@ def build_tools(
     def write_file(args: dict[str, Any]) -> Any:
         path = ws.resolve(args["path"])
         content = args["content"]
+        relative = ws.relative(path)
+        risk = assess_write_risk(relative, content, path.exists())
         if require_write_approval:
             old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
             diff = "\n".join(
                 difflib.unified_diff(
                     old.splitlines(),
                     content.splitlines(),
-                    fromfile=str(path.relative_to(ws.root)),
-                    tofile=str(path.relative_to(ws.root)),
+                    fromfile=relative,
+                    tofile=relative,
                     lineterm="",
                 )
             )
@@ -206,9 +265,12 @@ def build_tools(
             entries.append(
                 {
                     "id": pending_id,
-                    "path": str(path.relative_to(ws.root)),
+                    "operation": "write_file",
+                    "path": relative,
                     "content": content,
                     "diff": diff,
+                    "risk": risk,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
             )
             _save_json_list(pending_writes_path, entries)
@@ -216,23 +278,25 @@ def build_tools(
                 "ok": False,
                 "pending": True,
                 "id": pending_id,
-                "path": str(path.relative_to(ws.root)),
+                "path": relative,
                 "message": "Write is pending approval. Use /pending and /apply <id> in the TUI.",
                 "diff": diff,
+                "risk": risk,
             }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        return {"ok": True, "path": str(path.relative_to(ws.root)), "bytes": len(content.encode("utf-8"))}
+        return {"ok": True, "path": relative, "bytes": len(content.encode("utf-8"))}
 
     def read_document(args: dict[str, Any]) -> Any:
         path = ws.resolve(args["path"])
+        relative = ws.relative(path)
         max_chars = int(args.get("max_chars", 30000))
         if not path.exists():
             return {"error": "file does not exist", "path": args["path"]}
         if path.is_dir():
-            return {"error": "path is a directory; use list_files to inspect it", "path": str(path.relative_to(ws.root))}
+            return {"error": "path is a directory; use list_files to inspect it", "path": relative}
         if not path.is_file():
-            return {"error": "path is not a regular file", "path": str(path.relative_to(ws.root))}
+            return {"error": "path is not a regular file", "path": relative}
         suffix = path.suffix.lower()
         try:
             if suffix == ".docx":
@@ -251,7 +315,7 @@ def build_tools(
         except Exception as exc:
             return {"error": str(exc)}
         return {
-            "path": str(path.relative_to(ws.root)),
+            "path": relative,
             "content": text[:max_chars],
             "truncated": len(text) > max_chars,
         }
@@ -289,16 +353,17 @@ def build_tools(
                 continue
             if path.suffix.lower() not in TEXT_EXTENSIONS:
                 continue
+            relative = ws.relative(path)
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError as exc:
-                results.append({"path": str(path.relative_to(ws.root)), "error": str(exc)})
+                results.append({"path": relative, "error": str(exc)})
                 continue
             for line_no, line in enumerate(text.splitlines(), start=1):
                 if query.lower() in line.lower():
                     results.append(
                         {
-                            "path": str(path.relative_to(ws.root)),
+                            "path": relative,
                             "line": line_no,
                             "text": line[:300],
                         }
@@ -329,24 +394,44 @@ def build_tools(
     def run_powershell(args: dict[str, Any]) -> Any:
         if not allow_shell:
             return {"error": "shell execution is disabled. Set HOYA_ALLOW_SHELL=1 to enable it."}
-        if require_shell_approval:
-            return {
-                "error": "shell execution requires manual approval in this MVP.",
-                "command": args["command"],
-                "hint": "Run the command yourself or set HOYA_REQUIRE_SHELL_APPROVAL=0.",
-            }
         command = args["command"]
-        if any(token in command for token in ["..", "; cd", "Set-Location", "Push-Location"]):
+        timeout_seconds = int(args.get("timeout_seconds", 30))
+        risk = assess_shell_risk(command)
+        if not risk.get("allowed", False):
             return {
-                "error": "command rejected by workspace guard",
-                "hint": "Run simple inspection/test commands from the workspace root without changing directories.",
+                "error": "command rejected by risk check",
+                "command": command,
+                "risk": risk,
+            }
+        if require_shell_approval:
+            entries = _load_json_list(pending_writes_path)
+            pending_id = uuid.uuid4().hex[:8]
+            entries.append(
+                {
+                    "id": pending_id,
+                    "operation": "run_powershell",
+                    "command": command,
+                    "timeout_seconds": timeout_seconds,
+                    "risk": risk,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+            _save_json_list(pending_writes_path, entries)
+            return {
+                "ok": False,
+                "pending": True,
+                "id": pending_id,
+                "operation": "run_powershell",
+                "command": command,
+                "message": "Shell command is pending approval. Use /pending and /apply <id> in the TUI, or approve it in the desktop app.",
+                "risk": risk,
             }
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
             cwd=ws.root,
             text=True,
             capture_output=True,
-            timeout=int(args.get("timeout_seconds", 30)),
+            timeout=timeout_seconds,
             check=False,
         )
         return {

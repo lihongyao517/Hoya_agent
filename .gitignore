@@ -14,6 +14,18 @@ __pycache__/
 .venv/
 venv/
 
+# Desktop frontend/build artifacts
+desktop/node_modules/
+desktop/dist/
+desktop/release/
+desktop/.vite/
+desktop/npm-debug.log*
+desktop/yarn-debug.log*
+desktop/yarn-error.log*
+dist-backend/
+build/
+*.spec
+
 # Temporary/imported local files
 _desktop_import/
 _tmp_desktop_docs/

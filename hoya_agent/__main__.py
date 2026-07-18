@@ -23,6 +23,12 @@ def main() -> None:
         tui_main()
         return
 
+    if "--server" in sys.argv:
+        from .server import main as server_main
+
+        server_main()
+        return
+
     cli_main()
 
 
