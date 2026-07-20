@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .agent import HoyaAgent
-from .config import Config
-from .workspace_ops import HistoryStore, RunLog
+from ..agent import HoyaAgent
+from ..config import Config
+from ..workspace_ops import HistoryStore, RunLog
 
 
 PROMPT = "› "
@@ -63,6 +63,7 @@ def main() -> None:
     agent = HoyaAgent(config)
     history = HistoryStore(config.history_path)
     run_log = RunLog(config.run_log_path)
+    conversation_id = agent.conversations.create_conversation("CLI 对话")["id"]
 
     print_intro(config)
 
@@ -78,16 +79,21 @@ def main() -> None:
         if task.lower() in {"/exit", "exit", "quit", "q"}:
             print("已退出。")
             break
+        if task.lower() in {"/reset", "/new"}:
+            conversation_id = agent.conversations.create_conversation("CLI 对话")["id"]
+            print("已开始新上下文。长期记忆仍会保留。")
+            continue
 
         history.append("user", task)
+        agent.conversations.append_message(conversation_id, "user", task)
         run_log.append({"type": "task_start", "task": task, "ui": "cli"})
 
         answer_parts: list[str] = []
         answer_started = False
         try:
-            for event in agent.run_stream(task):
+            for event in agent.run_stream(task, conversation_id=conversation_id):
                 event_type = event.get("type")
-                if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "error", "done"}:
+                if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "stale_repeat", "error", "done"}:
                     run_log.append({"type": "agent_event", "event": event, "ui": "cli"})
 
                 if event_type == "status":
@@ -100,6 +106,10 @@ def main() -> None:
 
                 if event_type == "approval_required":
                     print(f"\n[approval required] {event.get('text', 'Operation pending approval')} id={event.get('id', '')}")
+                    continue
+
+                if event_type == "stale_repeat":
+                    print(f"\n[context warning] {event.get('text', '')}")
                     continue
 
                 if event_type == "tool_start":
@@ -149,6 +159,7 @@ def main() -> None:
         answer = "".join(answer_parts)
         if answer:
             history.append("assistant", answer)
+            agent.conversations.append_message(conversation_id, "assistant", answer)
         run_log.append({"type": "task_done", "task": task, "ui": "cli"})
 
 

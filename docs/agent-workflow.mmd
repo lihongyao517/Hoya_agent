@@ -1,0 +1,61 @@
+flowchart LR
+    subgraph intake ["Task Intake"]
+        userTask[/提交任务/]
+        createRun[创建 Run]
+        buildContext[装配上下文]
+    end
+
+    subgraph agentLoop ["Agent Loop"]
+        modelStream[模型流式推理]
+        outputType{输出类型?}
+        directAnswer[增量回答]
+        toolPlan[展示工具计划]
+        executeTool[执行工具]
+        toolResult[结构化结果]
+        stepLimit{达到上限?}
+    end
+
+    subgraph safety ["Safety Checkpoint"]
+        riskGate{需要审批?}
+        approvalQueue[(审批队列)]
+        reviewCard[呈现风险卡片]
+        userDecision{用户决定?}
+        denyAction[记录拒绝]
+        approveAction[执行批准操作]
+        resumeRun[恢复同一 Run]
+    end
+
+    subgraph delivery ["Delivery"]
+        staleCheck{疑似重复?}
+        finalAnswer[整理最终回答]
+        renderResult[保存并呈现]
+        cancelled([已取消])
+    end
+
+    userTask --> createRun --> buildContext --> modelStream
+    modelStream --> outputType
+    outputType -->|"直接回答"| directAnswer --> staleCheck
+    outputType -->|"工具调用"| toolPlan --> riskGate
+    riskGate -->|"无需审批"| executeTool
+    riskGate -->|"需要审批"| approvalQueue --> reviewCard --> userDecision
+    userDecision -->|"拒绝"| denyAction --> toolResult
+    userDecision -->|"批准"| approveAction --> resumeRun --> executeTool
+    executeTool --> toolResult --> stepLimit
+    stepLimit -->|"继续"| modelStream
+    stepLimit -->|"已达上限"| finalAnswer
+    staleCheck -->|"正常"| finalAnswer
+    staleCheck -->|"重复"| finalAnswer
+    finalAnswer --> renderResult
+    createRun -.->|"用户停止"| cancelled
+    modelStream -.->|"用户停止"| cancelled
+    reviewCard -.->|"用户停止"| cancelled
+
+    style intake fill:#C2E5FF,stroke:#3DADFF
+    style agentLoop fill:#D9D9D9,stroke:#B3B3B3
+    style safety fill:#FFECBD,stroke:#FFC943
+    style delivery fill:#CDF4D3,stroke:#66D575
+    style riskGate fill:#FFE0C2,stroke:#FF9E42
+    style userDecision fill:#FFE0C2,stroke:#FF9E42
+    style denyAction fill:#FFCDC2,stroke:#FF7556
+    style renderResult fill:#CDF4D3,stroke:#66D575
+    style cancelled fill:#D9D9D9,stroke:#B3B3B3

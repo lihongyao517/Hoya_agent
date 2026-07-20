@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import threading
+import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +27,8 @@ class AgentServerState:
         self.config: Config | None = None
         self.agent: HoyaAgent | None = None
         self.error: str | None = None
+        self.runs_lock = threading.Lock()
+        self.active_runs: dict[str, threading.Event] = {}
         self.reload()
 
     def reload(self, workspace: Path | None = None) -> None:
@@ -71,6 +75,33 @@ class AgentServerState:
                 raise RuntimeError(self.error or "Agent is not loaded")
             return self.agent
 
+    def conversation_paths(self) -> tuple[Path, Path]:
+        with self.lock:
+            if self.config is not None:
+                return self.config.conversations_index_path, self.config.conversations_dir
+            state_dir = self.workspace / ".hoya"
+            return state_dir / "conversations.json", state_dir / "conversations"
+
+    def begin_run(self, run_id: str) -> threading.Event:
+        with self.runs_lock:
+            if run_id in self.active_runs:
+                raise ValueError(f"run is already active: {run_id}")
+            cancel_event = threading.Event()
+            self.active_runs[run_id] = cancel_event
+            return cancel_event
+
+    def cancel_run(self, run_id: str) -> bool:
+        with self.runs_lock:
+            cancel_event = self.active_runs.get(run_id)
+            if cancel_event is None:
+                return False
+            cancel_event.set()
+            return True
+
+    def finish_run(self, run_id: str) -> None:
+        with self.runs_lock:
+            self.active_runs.pop(run_id, None)
+
 
 class HoyaRequestHandler(BaseHTTPRequestHandler):
     server_version = "HoyaAgentServer/0.1"
@@ -110,6 +141,12 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/conversations":
                 self.handle_conversations()
                 return
+            if parsed.path == "/api/tasks":
+                self.handle_tasks()
+                return
+            if parsed.path == "/api/projects":
+                self.handle_projects()
+                return
             if parsed.path == "/api/conversations/messages":
                 self.handle_conversation_messages(parsed.query)
                 return
@@ -121,6 +158,12 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/pending":
                 self.handle_pending()
+                return
+            if parsed.path == "/api/runs":
+                self.handle_runs(parsed.query)
+                return
+            if parsed.path == "/api/versions":
+                self.handle_versions(parsed.query)
                 return
             if parsed.path == "/api/search":
                 self.handle_search(parsed.query)
@@ -145,8 +188,20 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/conversations":
                 self.handle_create_conversation()
                 return
+            if parsed.path == "/api/tasks":
+                self.handle_create_task()
+                return
+            if parsed.path == "/api/projects":
+                self.handle_create_project()
+                return
+            if parsed.path == "/api/projects/select":
+                self.handle_select_project()
+                return
             if parsed.path == "/api/conversations/rename":
                 self.handle_rename_conversation()
+                return
+            if parsed.path == "/api/conversations/update":
+                self.handle_update_conversation()
                 return
             if parsed.path == "/api/conversations/delete":
                 self.handle_delete_conversation()
@@ -178,8 +233,17 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/pending/deny":
                 self.handle_deny_pending()
                 return
+            if parsed.path == "/api/runs/resume":
+                self.handle_resume_run_stream()
+                return
+            if parsed.path == "/api/versions/rollback":
+                self.handle_rollback_version()
+                return
             if parsed.path == "/api/chat":
                 self.handle_chat_stream()
+                return
+            if parsed.path == "/api/chat/cancel":
+                self.handle_cancel_chat()
                 return
             self.write_json({"ok": False, "error": "Not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -207,7 +271,8 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def conversation_store(self) -> ConversationStore:
-        return ConversationStore(self.state.workspace / ".hoya_conversations.json", self.state.workspace / ".hoya_conversations")
+        index_path, messages_dir = self.state.conversation_paths()
+        return ConversationStore(index_path, messages_dir)
 
     def user_settings_store(self) -> UserSettingsStore:
         return UserSettingsStore(default_settings_path())
@@ -219,9 +284,7 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             self.write_json({"ok": False, "error": "workspace is required"}, HTTPStatus.BAD_REQUEST)
             return
         self.state.reload(Path(workspace))
-        settings = self.user_settings_store().load()
-        settings["last_workspace"] = str(Path(workspace).resolve())
-        self.user_settings_store().save(settings)
+        self.user_settings_store().remember_project(Path(workspace))
         self.write_json(self.state.status_payload())
 
     def handle_get_config(self) -> None:
@@ -260,14 +323,79 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
     def handle_conversations(self) -> None:
         self.write_json({"ok": True, "conversations": self.conversation_store().list_conversations()})
 
+    def handle_tasks(self) -> None:
+        self.write_json({"ok": True, "tasks": self.conversation_store().list_conversations()})
+
+    def handle_projects(self) -> None:
+        store = self.user_settings_store()
+        store.remember_project(self.state.workspace)
+        self.write_json({"ok": True, "projects": store.list_projects(), "active_path": str(self.state.workspace)})
+
+    def handle_create_project(self) -> None:
+        payload = self.read_json()
+        parent_text = str(payload.get("parent", "")).strip()
+        name = str(payload.get("name", "")).strip()
+        if not parent_text or not name:
+            self.write_json({"ok": False, "error": "parent and name are required"}, HTTPStatus.BAD_REQUEST)
+            return
+        if name in {".", ".."} or any(char in name for char in '<>:"/\\|?*'):
+            self.write_json({"ok": False, "error": "project name contains invalid characters"}, HTTPStatus.BAD_REQUEST)
+            return
+        parent = Path(parent_text).expanduser().resolve()
+        if not parent.is_dir():
+            self.write_json({"ok": False, "error": "parent directory does not exist"}, HTTPStatus.BAD_REQUEST)
+            return
+        target = parent / name
+        if target.exists():
+            self.write_json({"ok": False, "error": "project directory already exists"}, HTTPStatus.CONFLICT)
+            return
+        target.mkdir()
+        source_env = self.state.workspace / ".env"
+        if source_env.is_file():
+            shutil.copy2(source_env, target / ".env")
+        self.state.reload(target)
+        project = self.user_settings_store().remember_project(target, name)
+        self.write_json({"ok": True, "project": project, "status": self.state.status_payload()})
+
+    def handle_select_project(self) -> None:
+        payload = self.read_json()
+        project_path = Path(str(payload.get("path", "")).strip()).expanduser().resolve()
+        if not project_path.is_dir():
+            self.write_json({"ok": False, "error": "project directory does not exist"}, HTTPStatus.BAD_REQUEST)
+            return
+        self.state.reload(project_path)
+        project = self.user_settings_store().remember_project(project_path)
+        self.write_json({"ok": True, "project": project, "status": self.state.status_payload()})
+
     def handle_create_conversation(self) -> None:
         payload = self.read_json()
         entry = self.conversation_store().create_conversation(str(payload.get("title", "")).strip() or None)
         self.write_json({"ok": True, "conversation": entry})
 
+    def handle_create_task(self) -> None:
+        payload = self.read_json()
+        title = str(payload.get("title", "")).strip() or "新任务"
+        entry = self.conversation_store().create_conversation(title, kind="task")
+        self.write_json({"ok": True, "task": entry})
+
     def handle_rename_conversation(self) -> None:
         payload = self.read_json()
         entry = self.conversation_store().rename_conversation(str(payload.get("id", "")), str(payload.get("title", "")))
+        self.write_json({"ok": True, "conversation": entry})
+
+    def handle_update_conversation(self) -> None:
+        payload = self.read_json()
+        conversation_id = str(payload.get("id", "")).strip()
+        if not conversation_id:
+            self.write_json({"ok": False, "error": "id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        title = str(payload.get("title", "")) if "title" in payload else None
+        color = str(payload.get("color", "")) if "color" in payload else None
+        try:
+            entry = self.conversation_store().update_conversation(conversation_id, title=title, color=color)
+        except ValueError as exc:
+            self.write_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
         self.write_json({"ok": True, "conversation": entry})
 
     def handle_delete_conversation(self) -> None:
@@ -339,6 +467,19 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
         config = self.state.require_config()
         self.write_json({"ok": True, "entries": load_pending_writes(config.pending_writes_path)})
 
+    def handle_runs(self, query: str) -> None:
+        params = parse_qs(query)
+        conversation_id = params.get("conversation_id", [""])[0]
+        limit = int(params.get("limit", ["20"])[0])
+        runs = self.state.require_agent().runs.list(conversation_id, limit)
+        self.write_json({"ok": True, "runs": runs, "latest": runs[0] if runs else None})
+
+    def handle_versions(self, query: str) -> None:
+        params = parse_qs(query)
+        run_id = params.get("run_id", [""])[0]
+        limit = int(params.get("limit", ["50"])[0])
+        self.write_json({"ok": True, "versions": self.state.require_agent().changes.list(run_id, limit)})
+
     def handle_search(self, query: str) -> None:
         config = self.state.require_config()
         params = parse_qs(query)
@@ -367,14 +508,21 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
         if not pending_id:
             self.write_json({"ok": False, "error": "id is required"}, HTTPStatus.BAD_REQUEST)
             return
-        self.write_json(
-            apply_pending_operation(
-                config.workspace,
-                config.pending_writes_path,
-                pending_id,
-                allow_shell=config.allow_shell,
-            )
+        agent = self.state.require_agent()
+        result = apply_pending_operation(
+            config.workspace,
+            config.pending_writes_path,
+            pending_id,
+            allow_shell=config.allow_shell,
+            change_store=agent.changes,
         )
+        run_id = str(result.get("run_id", ""))
+        if run_id and agent.runs.get(run_id) is not None:
+            if result.get("version_id"):
+                agent._register_change(run_id, result)
+            agent.runs.resolve_approval(run_id, "approved", result)
+            result["resumable"] = True
+        self.write_json(result)
 
     def handle_deny_pending(self) -> None:
         config = self.state.require_config()
@@ -383,40 +531,137 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
         if not pending_id:
             self.write_json({"ok": False, "error": "id is required"}, HTTPStatus.BAD_REQUEST)
             return
-        self.write_json(deny_pending_operation(config.pending_writes_path, pending_id))
+        agent = self.state.require_agent()
+        result = deny_pending_operation(config.pending_writes_path, pending_id)
+        run_id = str(result.get("run_id", ""))
+        if run_id and agent.runs.get(run_id) is not None:
+            denial_result = {**result, "ok": False, "denied": True, "error": "operation denied by user"}
+            agent.runs.resolve_approval(run_id, "denied", denial_result)
+            result["resumable"] = True
+        self.write_json(result)
+
+    def handle_rollback_version(self) -> None:
+        payload = self.read_json()
+        version_id = str(payload.get("version_id", "")).strip()
+        if not version_id:
+            self.write_json({"ok": False, "error": "version_id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        agent = self.state.require_agent()
+        version = agent.changes.get(version_id)
+        result = agent.changes.rollback(version_id)
+        if result.get("ok") and version and version.get("run_id") and agent.runs.get(str(version["run_id"])):
+            agent.runs.add_change(
+                str(version["run_id"]),
+                {
+                    "version_id": version_id,
+                    "path": version.get("path"),
+                    "verification": version.get("verification") or {},
+                    "rolled_back_at": result.get("rolled_back_at"),
+                },
+            )
+        self.write_json(result)
+
+    def handle_cancel_chat(self) -> None:
+        payload = self.read_json()
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            self.write_json({"ok": False, "error": "run_id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        cancelled = self.state.cancel_run(run_id)
+        self.write_json({"ok": True, "run_id": run_id, "cancelled": cancelled})
 
     def handle_chat_stream(self) -> None:
         payload = self.read_json()
         task = str(payload.get("task", "")).strip()
+        run_id = str(payload.get("run_id", "")).strip() or uuid.uuid4().hex
         conversation_store = self.conversation_store()
         conversation_id = str(payload.get("conversation_id", "")).strip() or conversation_store.ensure_default()["id"]
         if not task:
             self.write_json({"type": "error", "text": "task is required"}, HTTPStatus.BAD_REQUEST)
             return
+        if len(run_id) > 128 or any(not (ch.isalnum() or ch in "-_") for ch in run_id):
+            self.write_json({"type": "error", "text": "run_id is invalid"}, HTTPStatus.BAD_REQUEST)
+            return
 
         agent = self.state.require_agent()
+        cancel_event = self.state.begin_run(run_id)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
 
         try:
+            self.write_ndjson_event({"type": "run_started", "run_id": run_id})
             agent.history.append("user", task)
             conversation_store.append_message(conversation_id, "user", task)
-            agent.run_log.append({"type": "task_start", "task": task, "conversation_id": conversation_id, "ui": "desktop"})
+            agent.run_log.append({"type": "task_start", "task": task, "run_id": run_id, "conversation_id": conversation_id, "ui": "desktop"})
             final_text = ""
-            for event in agent.run_stream(task, conversation_id=conversation_id):
+            for event in agent.run_stream(task, conversation_id=conversation_id, cancel_event=cancel_event, run_id=run_id):
                 event_type = event.get("type")
-                if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "error", "done"}:
-                    agent.run_log.append({"type": "agent_event", "event": event, "conversation_id": conversation_id, "ui": "desktop"})
+                if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "error", "cancelled", "done"}:
+                    agent.run_log.append({"type": "agent_event", "event": event, "run_id": run_id, "conversation_id": conversation_id, "ui": "desktop"})
                 if event_type == "done":
                     final_text = str(event.get("text", ""))
                 self.write_ndjson_event(event)
             if final_text:
                 agent.history.append("assistant", final_text)
                 conversation_store.append_message(conversation_id, "assistant", final_text)
+        except (BrokenPipeError, ConnectionResetError):
+            cancel_event.set()
         except Exception as exc:
-            self.write_ndjson_event({"type": "error", "text": str(exc)})
+            try:
+                if agent.runs.get(run_id) is not None:
+                    agent.runs.mark(run_id, "failed", str(exc))
+                self.write_ndjson_event({"type": "error", "text": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                cancel_event.set()
+        finally:
+            self.state.finish_run(run_id)
+
+    def handle_resume_run_stream(self) -> None:
+        payload = self.read_json()
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            self.write_json({"ok": False, "error": "run_id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        agent = self.state.require_agent()
+        run = agent.runs.get(run_id)
+        if run is None:
+            self.write_json({"ok": False, "error": "run not found"}, HTTPStatus.NOT_FOUND)
+            return
+        if run.get("status") != "ready_to_resume":
+            self.write_json({"ok": False, "error": "run is not ready to resume"}, HTTPStatus.CONFLICT)
+            return
+        cancel_event = self.state.begin_run(run_id)
+        conversation_id = str(run.get("conversation_id", ""))
+        conversation_store = self.conversation_store()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            self.write_ndjson_event({"type": "run_started", "run_id": run_id, "resumed": True})
+            final_text = ""
+            for event in agent.resume_stream(run_id, cancel_event=cancel_event):
+                event_type = event.get("type")
+                if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "verification", "error", "cancelled", "done"}:
+                    agent.run_log.append({"type": "agent_event", "event": event, "run_id": run_id, "conversation_id": conversation_id, "ui": "desktop"})
+                if event_type == "done":
+                    final_text = str(event.get("text", ""))
+                self.write_ndjson_event(event)
+            if final_text:
+                agent.history.append("assistant", final_text)
+                conversation_store.append_message(conversation_id, "assistant", final_text)
+        except (BrokenPipeError, ConnectionResetError):
+            cancel_event.set()
+        except Exception as exc:
+            try:
+                agent.runs.mark(run_id, "failed", str(exc))
+                self.write_ndjson_event({"type": "error", "text": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                cancel_event.set()
+        finally:
+            self.state.finish_run(run_id)
 
 
 class HoyaHTTPServer(ThreadingHTTPServer):

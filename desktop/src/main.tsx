@@ -1,12 +1,67 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import appIconUrl from '../assets/icon.png'
+import {
+  Activity,
+  Bot,
+  Check,
+  ChevronRight,
+  Clock3,
+  Code2,
+  Copy,
+  Database,
+  Ellipsis,
+  FileDiff,
+  FilePlus2,
+  FolderOpen,
+  FolderPlus,
+  Globe2,
+  History,
+  Info,
+  Keyboard,
+  Languages,
+  LayoutDashboard,
+  Maximize2,
+  MessageSquare,
+  Minus,
+  Monitor,
+  Palette,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  SendHorizontal,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  Terminal,
+  Trash2,
+  TriangleAlert,
+  UserRound,
+  X,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react'
 import './styles.css'
 
 type Language = 'zh-CN' | 'en-US'
-type LlmProvider = 'openai-compatible' | 'ollama'
+type LlmProvider = 'openai-compatible' | 'anthropic' | 'ollama'
+type ConversationColor = '' | 'blue' | 'green' | 'amber' | 'red' | 'purple' | 'pink'
 
+const ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com'
 const OLLAMA_DEFAULT_BASE_URL = 'http://127.0.0.1:11434/v1'
 const OLLAMA_DEFAULT_MODEL = 'qwen2.5-coder:7b'
+const CONVERSATION_COLORS: Exclude<ConversationColor, ''>[] = ['blue', 'green', 'amber', 'red', 'purple', 'pink']
+const CONVERSATION_COLOR_VALUES: Record<Exclude<ConversationColor, ''>, string> = {
+  blue: '#79c0ff',
+  green: '#7ee787',
+  amber: '#f0b07d',
+  red: '#ff8b81',
+  purple: '#d2a8ff',
+  pink: '#f778ba',
+}
 
 type ServerStatus = {
   ok: boolean
@@ -34,6 +89,10 @@ type AgentEvent = {
   name?: string
   arguments?: string
   result?: string
+  run_id?: string
+  run?: TaskRun
+  change?: TaskChange
+  sources?: Array<Record<string, unknown>>
 }
 
 type ChatMessage = {
@@ -60,11 +119,49 @@ type PendingOperation = {
   diff?: string
   command?: string
   risk?: PendingRisk
+  run_id?: string
+}
+
+type TaskPlanItem = {
+  id: 'context' | 'execute' | 'verify' | 'deliver' | string
+  title: string
+  status: 'pending' | 'in_progress' | 'waiting' | 'completed' | 'failed' | 'cancelled' | string
+  note?: string
+}
+
+type TaskChange = {
+  version_id: string
+  path?: string
+  verification?: { ok?: boolean; summary?: string }
+  auto_rollback?: boolean
+  rolled_back_at?: string
+}
+
+type TaskRun = {
+  id: string
+  conversation_id: string
+  task: string
+  status: string
+  context_summary?: string
+  plan?: TaskPlanItem[]
+  changes?: TaskChange[]
+  updated_at?: string
 }
 
 type Conversation = {
   id: string
   title: string
+  color?: ConversationColor
+  kind?: 'task'
+  status?: 'open' | 'done'
+  created_at: string
+  updated_at: string
+}
+
+type Project = {
+  id: string
+  name: string
+  path: string
   created_at: string
   updated_at: string
 }
@@ -90,7 +187,7 @@ type ModelPreset = {
   show_reasoning?: boolean
 }
 
-type WireApi = 'chat' | 'responses'
+type WireApi = 'chat' | 'responses' | 'messages'
 
 type ApiConfigForm = {
   provider: LlmProvider
@@ -115,7 +212,9 @@ type IconName =
   | 'chevron-right'
   | 'clock'
   | 'code'
+  | 'copy'
   | 'database'
+  | 'edit'
   | 'file-diff'
   | 'file-plus'
   | 'folder-open'
@@ -126,16 +225,25 @@ type IconName =
   | 'keyboard'
   | 'language'
   | 'layout'
+  | 'maximize'
   | 'message'
+  | 'minimize'
   | 'monitor'
+  | 'more'
+  | 'palette'
+  | 'plus'
   | 'refresh'
+  | 'rollback'
   | 'search'
   | 'send'
   | 'settings'
   | 'shield'
   | 'sparkles'
+  | 'square'
   | 'terminal'
+  | 'trash'
   | 'user'
+  | 'x'
   | 'zap'
 
 const emptyApiConfigForm: ApiConfigForm = {
@@ -149,6 +257,20 @@ const emptyApiConfigForm: ApiConfigForm = {
   showReasoning: true,
 }
 
+const desktopBridge: HoyaBridge = window.hoya ?? {
+  serverUrl: async () => '',
+  getLanguage: async () => 'zh-CN',
+  setLanguage: async (language) => language,
+  onLanguageChanged: () => () => undefined,
+  windowMinimize: async () => undefined,
+  windowToggleMaximize: async () => false,
+  windowIsMaximized: async () => false,
+  windowClose: async () => undefined,
+  onWindowMaximizedChanged: () => () => undefined,
+  selectDirectory: async () => null,
+  selectFile: async () => null,
+}
+
 const translations = {
   'zh-CN': {
     localCodingAgent: '本地编程 Agent',
@@ -158,11 +280,15 @@ const translations = {
     apiConfig: 'API 配置',
     editApiConfig: '编辑 API 配置',
     saveAndReload: '保存并重载',
+    save: '保存',
     cancel: '取消',
     provider: '模型来源',
     openaiCompatible: 'OpenAI 兼容接口',
+    anthropicApi: 'Anthropic 原生接口',
     ollamaLocal: 'Ollama 本地模型',
     ollamaHint: '请先启动 Ollama，并执行 ollama pull qwen2.5-coder:7b，或填写你已安装的模型名。',
+    anthropicHint: '支持 Anthropic 官方地址或兼容 Anthropic Messages API 的中转站地址。',
+    relayHint: '中转站可填写 /v1 基础地址，也可直接填写完整的 chat/completions 或 responses 地址。',
     apiKey: 'API Key',
     currentApiKey: '当前密钥',
     noApiKey: '未设置',
@@ -197,10 +323,13 @@ const translations = {
     language: '语言',
     chinese: '中文',
     english: 'English',
-    startLocalTask: '开始本地 Agent 任务',
+    startLocalTask: '开始构建',
     emptyStateDescription: '可以请求代码修改、文档搜索、文件索引或工作区分析。工具调用和差异会显示在右侧。',
     describeTask: '描述你想要的修改或调查…',
     running: '运行中',
+    stop: '停止',
+    stopping: '正在停止',
+    stopped: '任务已由用户停止。',
     send: '发送',
     run: '运行',
     toolTrace: '工具轨迹',
@@ -238,6 +367,10 @@ const translations = {
     searchPreview: '索引搜索预览',
     enterToSend: 'Enter 发送',
     shiftEnterNewline: 'Shift + Enter 换行',
+    renameConversation: '重命名对话',
+    colorConversation: '设置高亮颜色',
+    deleteConversation: '删除对话',
+    clearColor: '清除高亮颜色',
     quickStart: '快捷开始',
     quickAnalyze: '分析当前工作区',
     quickAnalyzePrompt: '分析当前工作区的结构、关键模块和可以优化的地方。',
@@ -261,11 +394,15 @@ const translations = {
     apiConfig: 'API Config',
     editApiConfig: 'Edit API Config',
     saveAndReload: 'Save & Reload',
+    save: 'Save',
     cancel: 'Cancel',
     provider: 'Provider',
     openaiCompatible: 'OpenAI-compatible',
+    anthropicApi: 'Anthropic native API',
     ollamaLocal: 'Ollama local model',
     ollamaHint: 'Start Ollama first, then run ollama pull qwen2.5-coder:7b or enter a model you already have.',
+    anthropicHint: 'Use Anthropic directly or a relay compatible with the Anthropic Messages API.',
+    relayHint: 'For a relay, enter its /v1 base URL or the full chat/completions or responses endpoint.',
     apiKey: 'API Key',
     currentApiKey: 'Current key',
     noApiKey: 'Not set',
@@ -300,10 +437,13 @@ const translations = {
     language: 'Language',
     chinese: '中文',
     english: 'English',
-    startLocalTask: 'Start a local agent task',
+    startLocalTask: "Let's build",
     emptyStateDescription: 'Ask for code edits, document search, file indexing, or workspace analysis. Tool calls and diffs stay visible on the right.',
     describeTask: 'Describe the change or investigation you want…',
     running: 'Running',
+    stop: 'Stop',
+    stopping: 'Stopping',
+    stopped: 'Task stopped by user.',
     send: 'Send',
     run: 'Run',
     toolTrace: 'Tool trace',
@@ -341,6 +481,10 @@ const translations = {
     searchPreview: 'Indexed search preview',
     enterToSend: 'Enter to send',
     shiftEnterNewline: 'Shift + Enter for newline',
+    renameConversation: 'Rename conversation',
+    colorConversation: 'Set highlight color',
+    deleteConversation: 'Delete conversation',
+    clearColor: 'Clear highlight color',
     quickStart: 'Quick start',
     quickAnalyze: 'Analyze workspace',
     quickAnalyzePrompt: 'Analyze the current workspace structure, key modules, and optimization opportunities.',
@@ -366,41 +510,52 @@ function normalizeMarkdown(value: string) {
   return value.replace(/\r\n/g, '\n').replace(/\n{4,}$/g, '\n\n')
 }
 
+const icons: Record<IconName, LucideIcon> = {
+  activity: Activity,
+  alert: TriangleAlert,
+  bot: Bot,
+  check: Check,
+  'chevron-right': ChevronRight,
+  clock: Clock3,
+  code: Code2,
+  copy: Copy,
+  database: Database,
+  edit: Pencil,
+  'file-diff': FileDiff,
+  'file-plus': FilePlus2,
+  'folder-open': FolderOpen,
+  'folder-plus': FolderPlus,
+  globe: Globe2,
+  history: History,
+  info: Info,
+  keyboard: Keyboard,
+  language: Languages,
+  layout: LayoutDashboard,
+  maximize: Maximize2,
+  message: MessageSquare,
+  minimize: Minus,
+  monitor: Monitor,
+  more: Ellipsis,
+  palette: Palette,
+  plus: Plus,
+  refresh: RefreshCw,
+  rollback: RotateCcw,
+  search: Search,
+  send: SendHorizontal,
+  settings: Settings,
+  shield: ShieldCheck,
+  sparkles: Sparkles,
+  square: Square,
+  terminal: Terminal,
+  trash: Trash2,
+  user: UserRound,
+  x: X,
+  zap: Zap,
+}
+
 function Icon({ name, size = 18, className = '' }: { name: IconName; size?: number; className?: string }) {
-  const common = { fill: 'none', stroke: 'currentColor', strokeLinecap: 'round', strokeLinejoin: 'round', strokeWidth: 2 } as const
-  return (
-    <svg className={`icon ${className}`} width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" {...common}>
-      {name === 'activity' && <><path d="M22 12h-4l-3 8L9 4l-3 8H2" /></>}
-      {name === 'alert' && <><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z" /><path d="M12 9v4" /><path d="M12 17h.01" /></>}
-      {name === 'bot' && <><path d="M12 8V4H8" /><rect x="4" y="8" width="16" height="12" rx="2" /><path d="M2 14h2" /><path d="M20 14h2" /><path d="M9 13h.01" /><path d="M15 13h.01" /><path d="M9 17h6" /></>}
-      {name === 'check' && <><path d="M20 6 9 17l-5-5" /></>}
-      {name === 'chevron-right' && <><path d="m9 18 6-6-6-6" /></>}
-      {name === 'clock' && <><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></>}
-      {name === 'code' && <><path d="m16 18 6-6-6-6" /><path d="m8 6-6 6 6 6" /></>}
-      {name === 'database' && <><ellipse cx="12" cy="5" rx="8" ry="3" /><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5" /><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" /></>}
-      {name === 'file-diff' && <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6" /><path d="M12 18h4" /><path d="M8 13h8" /><path d="M8 17h1" /></>}
-      {name === 'file-plus' && <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6" /><path d="M12 18v-6" /><path d="M9 15h6" /></>}
-      {name === 'folder-open' && <><path d="m6 14 1.5-4.5A2 2 0 0 1 9.4 8H21l-2 8a2 2 0 0 1-2 1.5H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v1" /></>}
-      {name === 'folder-plus' && <><path d="M12 10v6" /><path d="M9 13h6" /><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></>}
-      {name === 'globe' && <><circle cx="12" cy="12" r="10" /><path d="M2 12h20" /><path d="M12 2a15.3 15.3 0 0 1 0 20" /><path d="M12 2a15.3 15.3 0 0 0 0 20" /></>}
-      {name === 'history' && <><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /><path d="M12 7v5l3 2" /></>}
-      {name === 'info' && <><circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" /></>}
-      {name === 'keyboard' && <><rect x="2" y="5" width="20" height="14" rx="2" /><path d="M6 9h.01" /><path d="M10 9h.01" /><path d="M14 9h.01" /><path d="M18 9h.01" /><path d="M8 13h8" /><path d="M6 17h12" /></>}
-      {name === 'language' && <><path d="m5 8 6 6" /><path d="m4 14 6-6 2-3" /><path d="M2 5h12" /><path d="M7 2h1" /><path d="m22 22-5-10-5 10" /><path d="M14 18h6" /></>}
-      {name === 'layout' && <><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 3v18" /><path d="M15 3v18" /></>}
-      {name === 'message' && <><path d="M21 15a4 4 0 0 1-4 4H7l-4 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" /></>}
-      {name === 'monitor' && <><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8" /><path d="M12 17v4" /></>}
-      {name === 'refresh' && <><path d="M21 12a9 9 0 0 0-15-6.7L3 8" /><path d="M3 3v5h5" /><path d="M3 12a9 9 0 0 0 15 6.7L21 16" /><path d="M16 16h5v5" /></>}
-      {name === 'search' && <><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></>}
-      {name === 'send' && <><path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" /></>}
-      {name === 'settings' && <><path d="M12.2 2h-.4a2 2 0 0 0-2 1.7l-.1.8a2 2 0 0 1-1.1 1.5l-.8.4a2 2 0 0 1-1.8 0l-.7-.3a2 2 0 0 0-2.5.8l-.2.4a2 2 0 0 0 .4 2.6l.6.5a2 2 0 0 1 0 3l-.6.5a2 2 0 0 0-.4 2.6l.2.4a2 2 0 0 0 2.5.8l.7-.3a2 2 0 0 1 1.8 0l.8.4a2 2 0 0 1 1.1 1.5l.1.8a2 2 0 0 0 2 1.7h.4a2 2 0 0 0 2-1.7l.1-.8a2 2 0 0 1 1.1-1.5l.8-.4a2 2 0 0 1 1.8 0l.7.3a2 2 0 0 0 2.5-.8l.2-.4a2 2 0 0 0-.4-2.6l-.6-.5a2 2 0 0 1 0-3l.6-.5a2 2 0 0 0 .4-2.6l-.2-.4a2 2 0 0 0-2.5-.8l-.7.3a2 2 0 0 1-1.8 0l-.8-.4a2 2 0 0 1-1.1-1.5l-.1-.8a2 2 0 0 0-2-1.7Z" /><circle cx="12" cy="12" r="3" /></>}
-      {name === 'shield' && <><path d="M20 13c0 5-3.5 7.5-7.7 8.8a1 1 0 0 1-.6 0C7.5 20.5 4 18 4 13V5l8-3 8 3Z" /><path d="m9 12 2 2 4-4" /></>}
-      {name === 'sparkles' && <><path d="M9.9 4.2 12 2l2.1 2.2L17 5l-2.9.8L12 8l-2.1-2.2L7 5Z" /><path d="M17.5 14 19 12.5l1.5 1.5 2 .5-2 .5-1.5 1.5-1.5-1.5-2-.5Z" /><path d="M5 14l2 2 2 6 2-6 2-2-2-2-2-6-2 6Z" /></>}
-      {name === 'terminal' && <><path d="m4 17 6-6-6-6" /><path d="M12 19h8" /></>}
-      {name === 'user' && <><path d="M19 21a7 7 0 0 0-14 0" /><circle cx="12" cy="7" r="4" /></>}
-      {name === 'zap' && <><path d="M13 2 3 14h8l-1 8 10-12h-8Z" /></>}
-    </svg>
-  )
+  const IconComponent = icons[name]
+  return <IconComponent aria-hidden="true" className={`icon ${className}`} size={size} strokeWidth={1.8} />
 }
 
 function App() {
@@ -409,14 +564,25 @@ function App() {
   const [status, setStatus] = useState<ServerStatus | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [activities, setActivities] = useState<Activity[]>([])
+  const [currentRun, setCurrentRun] = useState<TaskRun | null>(null)
   const [pending, setPending] = useState<PendingOperation[]>([])
   const [conversations, setConversations] = useState<Conversation[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
   const [activeConversationId, setActiveConversationId] = useState('')
+  const [conversationEditingId, setConversationEditingId] = useState('')
+  const [conversationTitleDraft, setConversationTitleDraft] = useState('')
+  const [conversationMenuId, setConversationMenuId] = useState('')
   const [models, setModels] = useState<ModelPreset[]>([])
   const [activeModelId, setActiveModelId] = useState('')
   const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([])
   const [newMemoryText, setNewMemoryText] = useState('')
-  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(true)
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false)
+  const [utilitiesOpen, setUtilitiesOpen] = useState(false)
+  const [projectCreatorOpen, setProjectCreatorOpen] = useState(false)
+  const [projectParent, setProjectParent] = useState('')
+  const [projectName, setProjectName] = useState('')
+  const [projectError, setProjectError] = useState('')
+  const [projectCreating, setProjectCreating] = useState(false)
   const [history, setHistory] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState('')
@@ -428,31 +594,45 @@ function App() {
   const [apiFieldErrors, setApiFieldErrors] = useState<ApiFieldErrors>({})
   const [apiConfigForm, setApiConfigForm] = useState<ApiConfigForm>(emptyApiConfigForm)
   const [busy, setBusy] = useState(false)
+  const [runStarted, setRunStarted] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const [approvalBusyId, setApprovalBusyId] = useState('')
   const [showToolDetails, setShowToolDetails] = useState(false)
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('run')
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [windowMaximized, setWindowMaximized] = useState(false)
   const chatEndRef = useRef<HTMLDivElement | null>(null)
+  const activeRunIdRef = useRef('')
+  const chatAbortControllerRef = useRef<AbortController | null>(null)
+  const stopRequestedRef = useRef(false)
   const t = translations[language]
 
   useEffect(() => {
-    window.hoya.serverUrl().then((url) => {
+    desktopBridge.serverUrl().then((url) => {
       setServerUrl(url)
       refreshStatus(url)
       refreshPending(url)
       refreshHistory(url)
       loadApiConfig(url)
       loadConversations(url)
+      loadProjects(url)
       loadModels(url)
       refreshMemory(url)
     })
   }, [])
 
   useEffect(() => {
-    window.hoya.getLanguage().then((nextLanguage) => {
+    desktopBridge.getLanguage().then((nextLanguage) => {
       if (isLanguage(nextLanguage)) setLanguage(nextLanguage)
     })
-    return window.hoya.onLanguageChanged((nextLanguage) => {
+    return desktopBridge.onLanguageChanged((nextLanguage) => {
       if (isLanguage(nextLanguage)) setLanguage(nextLanguage)
     })
+  }, [])
+
+  useEffect(() => {
+    desktopBridge.windowIsMaximized().then(setWindowMaximized)
+    return desktopBridge.onWindowMaximizedChanged(setWindowMaximized)
   }, [])
 
   useEffect(() => {
@@ -465,6 +645,7 @@ function App() {
 
   const safeStatus: ServerStatus = useMemo(() => status ?? { ok: false, workspace: t.disconnected as string }, [status, t.disconnected])
   const canSend = safeStatus.ok && !busy && task.trim().length > 0
+  const activeConversationTitle = conversations.find((item) => item.id === activeConversationId)?.title
 
   async function api(url: string, path: string, init?: RequestInit) {
     const response = await fetch(`${url}${path}`, {
@@ -495,6 +676,16 @@ function App() {
     setHistory((data.entries ?? []).map((entry: any) => `${entry.created_at} ${entry.role}: ${String(entry.content).slice(0, 240)}`).join('\n\n') || t.noHistory as string)
   }
 
+  async function loadLatestRun(conversationId = activeConversationId, url = serverUrl) {
+    if (!url || !conversationId) {
+      setCurrentRun(null)
+      return
+    }
+    const response = await api(url, `/api/runs?conversation_id=${encodeURIComponent(conversationId)}&limit=1`)
+    const data = await response.json()
+    setCurrentRun(data.latest ?? null)
+  }
+
   async function loadConversationMessages(id: string, url = serverUrl) {
     if (!url || !id) return
     const response = await api(url, `/api/conversations/messages?id=${encodeURIComponent(id)}&limit=200`)
@@ -502,42 +693,154 @@ function App() {
     setMessages((data.messages ?? []).filter((item: ConversationMessage) => item.role === 'user' || item.role === 'assistant' || item.role === 'system').map((item: ConversationMessage) => ({ role: item.role, content: item.content })))
   }
 
-  async function loadConversations(url = serverUrl) {
+  async function loadConversations(url = serverUrl, preferredId = '', reloadMessages = true) {
     if (!url) return
-    const response = await api(url, '/api/conversations')
+    const response = await api(url, '/api/tasks')
     const data = await response.json()
-    const list = data.conversations ?? []
+    const list: Conversation[] = data.tasks ?? []
     setConversations(list)
-    const selected = activeConversationId || list[0]?.id || ''
+    const currentId = preferredId || activeConversationId
+    const selected = list.some((item) => item.id === currentId) ? currentId : list[0]?.id || ''
     if (selected) {
       setActiveConversationId(selected)
-      await loadConversationMessages(selected, url)
+      await Promise.all([
+        reloadMessages ? loadConversationMessages(selected, url) : Promise.resolve(),
+        loadLatestRun(selected, url),
+      ])
+    } else {
+      setCurrentRun(null)
     }
   }
 
-  async function createConversation() {
+  async function createTask() {
     if (!serverUrl || busy) return
-    const response = await api(serverUrl, '/api/conversations', { method: 'POST', body: JSON.stringify({ title: language === 'zh-CN' ? '新对话' : 'New conversation' }) })
+    const response = await api(serverUrl, '/api/tasks', { method: 'POST', body: JSON.stringify({ title: language === 'zh-CN' ? '新任务' : 'New task' }) })
     const data = await response.json()
-    const id = data.conversation?.id ?? ''
+    const id = data.task?.id ?? ''
     if (id) {
       setActiveConversationId(id)
       setMessages([])
-      await loadConversations()
+      setConversationMenuId('')
+      await loadConversations(serverUrl, id)
     }
   }
 
   async function selectConversation(id: string) {
     if (!serverUrl || busy || id === activeConversationId) return
     setActiveConversationId(id)
-    await loadConversationMessages(id)
+    setConversationMenuId('')
+    await Promise.all([loadConversationMessages(id), loadLatestRun(id)])
+  }
+
+  async function loadProjects(url = serverUrl) {
+    if (!url) return
+    const response = await api(url, '/api/projects')
+    const data = await response.json()
+    setProjects(data.projects ?? [])
+  }
+
+  async function refreshProjectWorkspace(url = serverUrl) {
+    await Promise.all([
+      refreshPending(url),
+      refreshHistory(url),
+      loadApiConfig(url),
+      loadConversations(url, ''),
+      loadProjects(url),
+      loadModels(url),
+      refreshMemory(url),
+    ])
+  }
+
+  async function selectProject(project: Project) {
+    if (!serverUrl || busy || project.path === safeStatus.workspace) return
+    const response = await api(serverUrl, '/api/projects/select', {
+      method: 'POST',
+      body: JSON.stringify({ path: project.path }),
+    })
+    const data = await response.json()
+    setStatus(data.status)
+    setMessages([])
+    setActiveConversationId('')
+    await refreshProjectWorkspace()
+  }
+
+  async function beginCreateProject() {
+    const parent = await desktopBridge.selectDirectory()
+    if (!parent) return
+    setProjectParent(parent)
+    setProjectName(language === 'zh-CN' ? '新项目' : 'new-project')
+    setProjectError('')
+    setProjectCreatorOpen(true)
+  }
+
+  function closeProjectCreator() {
+    if (projectCreating) return
+    setProjectCreatorOpen(false)
+    setProjectError('')
+  }
+
+  async function createProject() {
+    if (!serverUrl || projectCreating || !projectParent || !projectName.trim()) return
+    setProjectCreating(true)
+    setProjectError('')
+    try {
+      const response = await api(serverUrl, '/api/projects', {
+        method: 'POST',
+        body: JSON.stringify({ parent: projectParent, name: projectName.trim() }),
+      })
+      const data = await response.json()
+      setStatus(data.status)
+      setMessages([])
+      setActiveConversationId('')
+      setProjectCreatorOpen(false)
+      await refreshProjectWorkspace()
+    } catch (error) {
+      setProjectError(String(error))
+    } finally {
+      setProjectCreating(false)
+    }
+  }
+
+  function beginRenameConversation(item: Conversation) {
+    setConversationEditingId(item.id)
+    setConversationTitleDraft(item.title)
+    setConversationMenuId('')
+  }
+
+  function cancelRenameConversation() {
+    setConversationEditingId('')
+    setConversationTitleDraft('')
+  }
+
+  async function saveConversationTitle(id: string) {
+    const title = conversationTitleDraft.trim()
+    if (!serverUrl || !title) return
+    const response = await api(serverUrl, '/api/conversations/update', {
+      method: 'POST',
+      body: JSON.stringify({ id, title }),
+    })
+    const data = await response.json()
+    setConversations((prev) => prev.map((item) => item.id === id ? data.conversation : item))
+    cancelRenameConversation()
+  }
+
+  async function setConversationColor(id: string, color: ConversationColor) {
+    if (!serverUrl) return
+    const response = await api(serverUrl, '/api/conversations/update', {
+      method: 'POST',
+      body: JSON.stringify({ id, color }),
+    })
+    const data = await response.json()
+    setConversations((prev) => prev.map((item) => item.id === id ? data.conversation : item))
+    setConversationMenuId('')
   }
 
   async function deleteConversation(id: string) {
     if (!serverUrl || busy) return
     await api(serverUrl, '/api/conversations/delete', { method: 'POST', body: JSON.stringify({ id }) })
-    setActiveConversationId('')
-    await loadConversations()
+    setConversationMenuId('')
+    setConversationEditingId('')
+    await loadConversations(serverUrl, id === activeConversationId ? '' : activeConversationId)
   }
 
   async function loadModels(url = serverUrl) {
@@ -558,7 +861,7 @@ function App() {
         provider: apiConfigForm.provider,
         base_url: apiConfigForm.baseUrl,
         model: apiConfigForm.model,
-        wire_api: apiConfigForm.provider === 'ollama' ? 'chat' : apiConfigForm.wireApi,
+        wire_api: apiConfigForm.provider === 'ollama' ? 'chat' : apiConfigForm.provider === 'anthropic' ? 'messages' : apiConfigForm.wireApi,
         reasoning_effort: apiConfigForm.reasoningEffort,
         show_reasoning: apiConfigForm.showReasoning,
       }),
@@ -604,20 +907,16 @@ function App() {
   }
 
   async function chooseWorkspace() {
-    const directory = await window.hoya.selectDirectory()
+    const directory = await desktopBridge.selectDirectory()
     if (!directory || !serverUrl) return
     const response = await api(serverUrl, '/api/workspace', {
       method: 'POST',
       body: JSON.stringify({ workspace: directory }),
     })
     setStatus(await response.json())
-    setMessages((prev) => [...prev, { role: 'system', content: t.workspaceChanged(directory) }])
-    refreshPending()
-    refreshHistory()
-    loadApiConfig()
-    loadConversations()
-    loadModels()
-    refreshMemory()
+    setMessages([])
+    setActiveConversationId('')
+    await refreshProjectWorkspace()
   }
 
   async function reloadConfig() {
@@ -636,8 +935,8 @@ function App() {
       const response = await api(url, '/api/config')
       const data = await response.json()
       const config = data.config ?? {}
-      const provider: LlmProvider = config.provider === 'ollama' ? 'ollama' : 'openai-compatible'
-      const wireApi = config.wire_api === 'responses' ? 'responses' : 'chat'
+      const provider: LlmProvider = config.provider === 'ollama' ? 'ollama' : config.provider === 'anthropic' ? 'anthropic' : 'openai-compatible'
+      const wireApi: WireApi = config.wire_api === 'responses' ? 'responses' : config.wire_api === 'messages' ? 'messages' : 'chat'
       setApiConfigForm({
         provider,
         apiKey: '',
@@ -677,7 +976,7 @@ function App() {
         provider: apiConfigForm.provider,
         base_url: apiConfigForm.baseUrl,
         model: apiConfigForm.model,
-        wire_api: apiConfigForm.provider === 'ollama' ? 'chat' : apiConfigForm.wireApi,
+        wire_api: apiConfigForm.provider === 'ollama' ? 'chat' : apiConfigForm.provider === 'anthropic' ? 'messages' : apiConfigForm.wireApi,
         reasoning_effort: apiConfigForm.reasoningEffort,
         show_reasoning: apiConfigForm.showReasoning,
       }
@@ -710,7 +1009,7 @@ function App() {
 
   async function importPath(kind: 'file' | 'directory') {
     if (!serverUrl) return
-    const source = kind === 'file' ? await window.hoya.selectFile() : await window.hoya.selectDirectory()
+    const source = kind === 'file' ? await desktopBridge.selectFile() : await desktopBridge.selectDirectory()
     if (!source) return
     const response = await api(serverUrl, '/api/import', {
       method: 'POST',
@@ -742,71 +1041,193 @@ function App() {
   }
 
   async function applyPending(id: string) {
-    if (!serverUrl) return
-    const response = await api(serverUrl, '/api/pending/apply', {
-      method: 'POST',
-      body: JSON.stringify({ id }),
-    })
-    const data = await response.json()
-    const label = data.operation === 'run_powershell'
-      ? `Shell ${data.returncode ?? ''}`.trim()
-      : data.path
-    setMessages((prev) => [...prev, { role: data.ok ? 'system' : 'error', content: data.ok ? t.writeApplied(label) : data.error }])
-    refreshPending()
+    if (!serverUrl || approvalBusyId) return
+    setApprovalBusyId(id)
+    try {
+      const response = await api(serverUrl, '/api/pending/apply', {
+        method: 'POST',
+        body: JSON.stringify({ id }),
+      })
+      const data = await response.json()
+      const label = data.operation === 'run_powershell'
+        ? `Shell ${data.returncode ?? ''}`.trim()
+        : data.path
+      setActivities((prev) => [...prev, { kind: data.ok ? 'approval' : 'error', title: data.ok ? t.writeApplied(label) : data.error }])
+      await refreshPending()
+      if (data.resumable && data.run_id) {
+        await resumeRun(data.run_id)
+      } else {
+        setMessages((prev) => [...prev, { role: data.ok ? 'system' : 'error', content: data.ok ? t.writeApplied(label) : data.error }])
+      }
+    } catch (error) {
+      setMessages((prev) => [...prev, { role: 'error', content: String(error) }])
+    } finally {
+      setApprovalBusyId('')
+    }
   }
 
   async function denyPending(id: string) {
-    if (!serverUrl) return
-    const response = await api(serverUrl, '/api/pending/deny', {
+    if (!serverUrl || approvalBusyId) return
+    setApprovalBusyId(id)
+    try {
+      const response = await api(serverUrl, '/api/pending/deny', {
+        method: 'POST',
+        body: JSON.stringify({ id }),
+      })
+      const data = await response.json()
+      setActivities((prev) => [...prev, { kind: 'approval', title: language === 'zh-CN' ? `已拒绝操作 ${id}` : `Denied operation ${id}` }])
+      await refreshPending()
+      if (data.resumable && data.run_id) {
+        await resumeRun(data.run_id)
+      } else {
+        setMessages((prev) => [...prev, { role: data.ok ? 'system' : 'error', content: data.ok ? `Denied pending operation: ${id}` : data.error }])
+      }
+    } catch (error) {
+      setMessages((prev) => [...prev, { role: 'error', content: String(error) }])
+    } finally {
+      setApprovalBusyId('')
+    }
+  }
+
+  async function rollbackVersion(versionId: string) {
+    if (!serverUrl || busy) return
+    const response = await api(serverUrl, '/api/versions/rollback', {
       method: 'POST',
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ version_id: versionId }),
     })
     const data = await response.json()
-    setMessages((prev) => [...prev, { role: data.ok ? 'system' : 'error', content: data.ok ? `Denied pending operation: ${id}` : data.error }])
-    refreshPending()
+    setActivities((prev) => [...prev, {
+      kind: data.ok ? 'rollback' : 'error',
+      title: data.ok
+        ? (language === 'zh-CN' ? `已回滚 ${data.path}` : `Rolled back ${data.path}`)
+        : data.error,
+    }])
+    await loadLatestRun()
+  }
+
+  async function stopTask() {
+    const runId = activeRunIdRef.current
+    if (!serverUrl || !busy || !runStarted || !runId || stopping) return
+    setStopping(true)
+    stopRequestedRef.current = true
+    try {
+      await api(serverUrl, '/api/chat/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ run_id: runId }),
+      })
+    } catch (error) {
+      setActivities((prev) => [...prev, { kind: 'error', title: String(error) }])
+    } finally {
+      chatAbortControllerRef.current?.abort()
+    }
   }
 
   async function submitTask() {
     if (!serverUrl || !task.trim() || busy) return
     const currentTask = task.trim()
+    const runId = crypto.randomUUID()
+    const abortController = new AbortController()
+    activeRunIdRef.current = runId
+    chatAbortControllerRef.current = abortController
+    stopRequestedRef.current = false
     setTask('')
     setBusy(true)
+    setRunStarted(false)
+    setStopping(false)
     setInspectorTab('run')
+    setCurrentRun(null)
     setMessages((prev) => [...prev, { role: 'user', content: currentTask }, { role: 'assistant', content: '' }])
 
     try {
       const response = await api(serverUrl, '/api/chat', {
         method: 'POST',
-        body: JSON.stringify({ task: currentTask, conversation_id: activeConversationId }),
+        body: JSON.stringify({ task: currentTask, conversation_id: activeConversationId, run_id: runId }),
+        signal: abortController.signal,
       })
-      if (!response.body) throw new Error(t.emptyResponseBody as string)
-
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      while (true) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-        for (const line of lines) {
-          if (!line.trim()) continue
-          handleAgentEvent(JSON.parse(line) as AgentEvent)
-        }
-      }
-      if (buffer.trim()) handleAgentEvent(JSON.parse(buffer) as AgentEvent)
+      await consumeAgentStream(response)
     } catch (error) {
-      setMessages((prev) => [...prev, { role: 'error', content: String(error) }])
+      const aborted = stopRequestedRef.current || (error instanceof Error && error.name === 'AbortError')
+      if (aborted) {
+        setMessages((prev) => {
+          const next = [...prev]
+          if (next.at(-1)?.role === 'assistant' && !next.at(-1)?.content.trim()) next.pop()
+          if (next.at(-1)?.role !== 'system' || next.at(-1)?.content !== t.stopped) {
+            next.push({ role: 'system', content: t.stopped as string })
+          }
+          return next
+        })
+        setActivities((prev) => [...prev, { kind: 'cancelled', title: t.stopped as string }])
+      } else {
+        setMessages((prev) => [...prev, { role: 'error', content: String(error) }])
+      }
     } finally {
       setBusy(false)
+      setRunStarted(false)
+      setStopping(false)
+      activeRunIdRef.current = ''
+      chatAbortControllerRef.current = null
       refreshPending()
       refreshHistory()
-      loadConversations()
+      loadConversations(serverUrl, activeConversationId, false)
+    }
+  }
+
+  async function consumeAgentStream(response: Response) {
+    if (!response.body) throw new Error(t.emptyResponseBody as string)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        handleAgentEvent(JSON.parse(line) as AgentEvent)
+      }
+    }
+    if (buffer.trim()) handleAgentEvent(JSON.parse(buffer) as AgentEvent)
+  }
+
+  async function resumeRun(runId: string) {
+    if (!serverUrl || busy) return
+    const abortController = new AbortController()
+    activeRunIdRef.current = runId
+    chatAbortControllerRef.current = abortController
+    stopRequestedRef.current = false
+    setBusy(true)
+    setRunStarted(false)
+    setStopping(false)
+    setInspectorTab('run')
+    setMessages((prev) => prev.at(-1)?.role === 'assistant' ? prev : [...prev, { role: 'assistant', content: '' }])
+    try {
+      const response = await api(serverUrl, '/api/runs/resume', {
+        method: 'POST',
+        body: JSON.stringify({ run_id: runId }),
+        signal: abortController.signal,
+      })
+      await consumeAgentStream(response)
+    } catch (error) {
+      const aborted = stopRequestedRef.current || (error instanceof Error && error.name === 'AbortError')
+      if (!aborted) setMessages((prev) => [...prev, { role: 'error', content: String(error) }])
+    } finally {
+      setBusy(false)
+      setRunStarted(false)
+      setStopping(false)
+      activeRunIdRef.current = ''
+      chatAbortControllerRef.current = null
+      await Promise.all([refreshPending(), refreshHistory(), loadLatestRun()])
+      loadConversations(serverUrl, activeConversationId, false)
     }
   }
 
   function handleAgentEvent(event: AgentEvent) {
+    if (event.type === 'run_started') {
+      setRunStarted(true)
+      return
+    }
     if (event.type === 'status') {
       setActivities((prev) => [...prev, { kind: 'status', title: event.text ?? t.running as string }])
       return
@@ -839,6 +1260,33 @@ function App() {
       return
     }
     if (event.type === 'done') return
+    if (event.type === 'cancelled') {
+      setActivities((prev) => [...prev, { kind: 'cancelled', title: event.text ?? t.stopped as string }])
+      setMessages((prev) => prev.at(-1)?.role === 'system' && prev.at(-1)?.content === t.stopped
+        ? prev
+        : [...prev, { role: 'system', content: t.stopped as string }])
+      return
+    }
+    if (event.type === 'run_state' && event.run) {
+      setCurrentRun(event.run)
+      return
+    }
+    if (event.type === 'context_summary') {
+      setActivities((prev) => [...prev, { kind: 'context', title: event.text ?? '' }])
+      return
+    }
+    if (event.type === 'verification') {
+      const verification = event.change?.verification
+      setActivities((prev) => [...prev, {
+        kind: verification?.ok ? 'verification' : 'error',
+        title: `${event.change?.path ?? ''}: ${verification?.summary ?? (language === 'zh-CN' ? '校验完成' : 'Verification completed')}`,
+      }])
+      return
+    }
+    if (event.type === 'stale_repeat') {
+      setActivities((prev) => [...prev, { kind: 'context', title: event.text ?? (language === 'zh-CN' ? '检测到可能复读，建议新建对话。' : 'Possible stale repeat detected. Start a new chat if this is off-topic.') }])
+      return
+    }
     if (event.type === 'error') {
       setMessages((prev) => [...prev, { role: 'error', content: event.text ?? t.unknownError as string }])
     }
@@ -860,7 +1308,7 @@ function App() {
 
   function changeLanguage(nextLanguage: Language) {
     setLanguage(nextLanguage)
-    window.hoya.setLanguage(nextLanguage)
+    desktopBridge.setLanguage(nextLanguage)
   }
 
   function changeProvider(provider: LlmProvider) {
@@ -875,7 +1323,22 @@ function App() {
           wireApi: 'chat',
         }
       }
-      return { ...prev, provider }
+      if (provider === 'anthropic') {
+        return {
+          ...prev,
+          provider,
+          baseUrl: prev.provider === 'anthropic' ? prev.baseUrl : ANTHROPIC_DEFAULT_BASE_URL,
+          model: prev.provider === 'anthropic' ? prev.model : '',
+          wireApi: 'messages',
+        }
+      }
+      return {
+        ...prev,
+        provider,
+        baseUrl: prev.provider === 'openai-compatible' ? prev.baseUrl : '',
+        model: prev.provider === 'openai-compatible' ? prev.model : '',
+        wireApi: prev.wireApi === 'responses' ? 'responses' : 'chat',
+      }
     })
   }
 
@@ -893,7 +1356,6 @@ function App() {
       <button className={`action-button ${variant}`} disabled={disabled} onClick={onClick} type="button">
         <span className="action-icon"><Icon name={icon} /></span>
         <span className="action-label">{children}</span>
-        <Icon name="chevron-right" size={15} className="action-chevron" />
       </button>
     )
   }
@@ -1028,10 +1490,12 @@ function App() {
   function MessageCard({ message }: { message: ChatMessage }) {
     return (
       <div className={`message ${message.role}`}>
-        <div className="message-header">
-          <span className="message-icon"><Icon name={roleIcon(message.role)} size={15} /></span>
-          <b>{roleLabel(message.role)}</b>
-        </div>
+        {message.role !== 'user' && (
+          <div className="message-header">
+            <span className="message-icon"><Icon name={roleIcon(message.role)} size={15} /></span>
+            <b>{roleLabel(message.role)}</b>
+          </div>
+        )}
         <MarkdownMessage content={message.content} />
       </div>
     )
@@ -1043,6 +1507,10 @@ function App() {
     if (kind === 'status') return 'activity'
     if (kind === 'reasoning') return 'sparkles'
     if (kind === 'approval') return 'shield'
+    if (kind === 'verification') return 'check'
+    if (kind === 'rollback') return 'rollback'
+    if (kind === 'cancelled') return 'square'
+    if (kind === 'error') return 'alert'
     return 'info'
   }
 
@@ -1053,11 +1521,46 @@ function App() {
     { icon: 'shield' as IconName, title: t.quickReview as string, prompt: t.quickReviewPrompt as string },
   ]
 
+  function TaskComposer({ embedded = false }: { embedded?: boolean }) {
+    return (
+      <section className={`composer ${embedded ? 'embedded' : ''}`}>
+        <div className="composer-shell">
+          <textarea
+            aria-label={t.describeTask as string}
+            value={task}
+            onChange={(e) => setTask(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                submitTask()
+              }
+            }}
+            placeholder={t.describeTask as string}
+          />
+          <div className="composer-toolbar">
+            <button aria-label={t.openWorkspace as string} className="composer-tool" onClick={chooseWorkspace} title={t.openWorkspace as string} type="button"><Icon name="plus" size={17} /></button>
+            <span className={`composer-status ${safeStatus.ok ? 'ready' : 'error'}`}><span />{safeStatus.ok ? t.ready : t.notReady}</span>
+          </div>
+        </div>
+        <button
+          aria-label={stopping ? t.stopping as string : busy ? t.stop as string : t.send as string}
+          className={`send-button ${busy ? 'stop-button' : ''}`}
+          disabled={busy ? stopping || !runStarted : !canSend}
+          onClick={busy ? stopTask : submitTask}
+          title={busy ? t.stop as string : t.send as string}
+          type="button"
+        >
+          <Icon name={busy ? 'square' : 'send'} size={18} />
+        </button>
+      </section>
+    )
+  }
+
   return (
-    <div className="app shell">
+    <div className={`app shell ${inspectorOpen ? 'inspector-open' : 'inspector-closed'} ${windowMaximized ? 'window-maximized' : ''}`}>
       <aside className="sidebar">
         <div className="brand">
-          <div className="logo">HY</div>
+          <div className="logo"><img alt="" src={appIconUrl} /></div>
           <div className="brand-copy">
             <div className="brand-row">
               <h1>Hoya Agent</h1>
@@ -1067,23 +1570,47 @@ function App() {
           </div>
         </div>
 
-        <div className="nav-section">
-          <SectionHeader icon="folder-open" title={t.workspace} onClick={() => setWorkspaceMenuOpen((open) => !open)} open={workspaceMenuOpen} />
+        <div className="sidebar-scroll">
+        <div className="nav-section nav-workspace">
+          <SectionHeader icon="folder-open" title={language === 'zh-CN' ? '项目' : 'Projects'} />
+          <div className="project-actions">
+            <button className="action-button project-action-button" disabled={busy} onClick={beginCreateProject} type="button"><span className="action-icon"><Icon name="folder-plus" /></span><span className="action-label">{language === 'zh-CN' ? '新建项目' : 'New project'}</span></button>
+            <button className="action-button project-action-button" disabled={busy} onClick={chooseWorkspace} type="button"><span className="action-icon"><Icon name="folder-open" /></span><span className="action-label">{language === 'zh-CN' ? '打开项目' : 'Open project'}</span></button>
+          </div>
+          <div className="list-stack project-list">
+            {projects.slice(0, 6).map((project) => (
+              <div className={`list-row project-row ${project.path === safeStatus.workspace ? 'active' : ''}`} key={project.id}>
+                <button disabled={busy} onClick={() => selectProject(project)} title={project.path} type="button">
+                  <Icon name="folder-open" size={15} />
+                  <span><strong>{project.name}</strong><small>{project.path}</small></span>
+                </button>
+              </div>
+            ))}
+          </div>
+          <SectionHeader icon="settings" title={language === 'zh-CN' ? '项目工具' : 'Project tools'} onClick={() => setWorkspaceMenuOpen((open) => !open)} open={workspaceMenuOpen} />
           {workspaceMenuOpen && (
             <div className="collapsible-section">
-              <ActionButton icon="folder-open" onClick={chooseWorkspace}>{t.openWorkspace}</ActionButton>
               <ActionButton icon="refresh" onClick={reloadConfig}>{t.reloadConfig}</ActionButton>
               <ActionButton icon="settings" onClick={toggleApiConfig}>{t.apiConfig}</ActionButton>
               <ActionButton icon="database" onClick={buildWorkspaceIndex}>{t.indexWorkspace}</ActionButton>
             </div>
           )}
           {apiConfigOpen && (
-            <div className="config-editor">
-              <SectionHeader icon="settings" title={t.editApiConfig} />
+            <>
+            <button className="modal-backdrop" aria-label={t.cancel as string} onClick={closeApiConfig} type="button" />
+            <div aria-modal="true" className="config-editor" role="dialog">
+              <div className="config-modal-head">
+                <div>
+                  <span className="eyebrow">Hoya Agent</span>
+                  <h2>{t.editApiConfig}</h2>
+                </div>
+                <button aria-label={t.cancel as string} className="icon-button" onClick={closeApiConfig} title={t.cancel as string} type="button"><Icon name="x" /></button>
+              </div>
               <label className="config-field">
                 <span>{t.provider}</span>
                 <select value={apiConfigForm.provider} onChange={(e) => changeProvider(e.target.value as LlmProvider)}>
                   <option value="openai-compatible">{t.openaiCompatible}</option>
+                  <option value="anthropic">{t.anthropicApi}</option>
                   <option value="ollama">{t.ollamaLocal}</option>
                 </select>
                 {apiFieldErrors.provider && <span className="field-error">{apiFieldErrors.provider}</span>}
@@ -1101,21 +1628,24 @@ function App() {
                 </>
               )}
               {apiConfigForm.provider === 'ollama' && <div className="config-hint">{t.ollamaHint}</div>}
+              {apiConfigForm.provider === 'anthropic' && <div className="config-hint">{t.anthropicHint}</div>}
+              {apiConfigForm.provider === 'openai-compatible' && <div className="config-hint">{t.relayHint}</div>}
               <label className="config-field">
                 <span>{t.baseUrl}</span>
-                <input value={apiConfigForm.baseUrl} onChange={(e) => setApiConfigForm((prev) => ({ ...prev, baseUrl: e.target.value }))} placeholder={apiConfigForm.provider === 'ollama' ? OLLAMA_DEFAULT_BASE_URL : 'https://example.com/v1'} />
+                <input value={apiConfigForm.baseUrl} onChange={(e) => setApiConfigForm((prev) => ({ ...prev, baseUrl: e.target.value }))} placeholder={apiConfigForm.provider === 'ollama' ? OLLAMA_DEFAULT_BASE_URL : apiConfigForm.provider === 'anthropic' ? ANTHROPIC_DEFAULT_BASE_URL : 'https://relay.example.com/v1'} />
                 {apiFieldErrors.base_url && <span className="field-error">{apiFieldErrors.base_url}</span>}
               </label>
               <label className="config-field">
                 <span>{t.model}</span>
-                <input value={apiConfigForm.model} onChange={(e) => setApiConfigForm((prev) => ({ ...prev, model: e.target.value }))} placeholder={apiConfigForm.provider === 'ollama' ? OLLAMA_DEFAULT_MODEL : 'gpt-4o-mini'} />
+                <input value={apiConfigForm.model} onChange={(e) => setApiConfigForm((prev) => ({ ...prev, model: e.target.value }))} placeholder={apiConfigForm.provider === 'ollama' ? OLLAMA_DEFAULT_MODEL : apiConfigForm.provider === 'anthropic' ? 'claude-opus-4-8' : 'gpt-4o-mini'} />
                 {apiFieldErrors.model && <span className="field-error">{apiFieldErrors.model}</span>}
               </label>
               <label className="config-field">
                 <span>{t.wireApi}</span>
-                <select disabled={apiConfigForm.provider === 'ollama'} value={apiConfigForm.provider === 'ollama' ? 'chat' : apiConfigForm.wireApi} onChange={(e) => setApiConfigForm((prev) => ({ ...prev, wireApi: e.target.value as WireApi }))}>
+                <select disabled={apiConfigForm.provider !== 'openai-compatible'} value={apiConfigForm.provider === 'ollama' ? 'chat' : apiConfigForm.provider === 'anthropic' ? 'messages' : apiConfigForm.wireApi} onChange={(e) => setApiConfigForm((prev) => ({ ...prev, wireApi: e.target.value as WireApi }))}>
                   <option value="chat">chat</option>
                   <option value="responses">responses</option>
+                  <option value="messages">messages</option>
                 </select>
                 {apiFieldErrors.wire_api && <span className="field-error">{apiFieldErrors.wire_api}</span>}
               </label>
@@ -1137,50 +1667,129 @@ function App() {
                 <button className="button ghost" disabled={apiConfigSaving} onClick={closeApiConfig} type="button">{t.cancel}</button>
               </div>
             </div>
+            </>
+          )}
+          {projectCreatorOpen && (
+            <>
+              <button className="modal-backdrop" aria-label={t.cancel as string} onClick={closeProjectCreator} type="button" />
+              <div aria-modal="true" className="config-editor project-creator" role="dialog">
+                <div className="config-modal-head">
+                  <div>
+                    <span className="eyebrow">Hoya Agent</span>
+                    <h2>{language === 'zh-CN' ? '新建项目' : 'New project'}</h2>
+                  </div>
+                  <button aria-label={t.cancel as string} className="icon-button" onClick={closeProjectCreator} title={t.cancel as string} type="button"><Icon name="x" /></button>
+                </div>
+                <label className="config-field">
+                  <span>{language === 'zh-CN' ? '保存位置' : 'Location'}</span>
+                  <input readOnly value={projectParent} />
+                </label>
+                <label className="config-field">
+                  <span>{language === 'zh-CN' ? '项目名称' : 'Project name'}</span>
+                  <input autoFocus maxLength={80} value={projectName} onChange={(event) => setProjectName(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && createProject()} />
+                </label>
+                {projectError && <div className="field-error">{projectError}</div>}
+                <div className="config-actions">
+                  <button className="button primary" disabled={projectCreating || !projectName.trim()} onClick={createProject} type="button">{projectCreating ? t.running : (language === 'zh-CN' ? '创建并打开' : 'Create and open')}</button>
+                  <button className="button ghost" disabled={projectCreating} onClick={closeProjectCreator} type="button">{t.cancel}</button>
+                </div>
+              </div>
+            </>
           )}
         </div>
 
-        <div className="nav-section">
-          <SectionHeader icon="message" title={language === 'zh-CN' ? '对话' : 'Conversations'} />
-          <button className="button secondary full" disabled={busy} onClick={createConversation} type="button"><Icon name="message" size={14} />{language === 'zh-CN' ? '新建对话' : 'New chat'}</button>
+        <div className="nav-section nav-conversations">
+          <SectionHeader icon="message" title={language === 'zh-CN' ? '任务' : 'Tasks'} />
+          <button className="button full new-task-button" disabled={busy} onClick={createTask} type="button"><Icon name="file-plus" size={16} />{language === 'zh-CN' ? '新建任务' : 'New task'}</button>
           <div className="list-stack">
             {conversations.slice(0, 8).map((item) => (
-              <div className={`list-row ${item.id === activeConversationId ? 'active' : ''}`} key={item.id}>
-                <button disabled={busy} onClick={() => selectConversation(item.id)} title={item.title} type="button">{item.title}</button>
-                <button className="mini-danger" disabled={busy} onClick={() => deleteConversation(item.id)} title="delete" type="button">×</button>
+              <div
+                className={`list-row conversation-row ${item.id === activeConversationId ? 'active' : ''} ${item.color ? 'has-color' : ''}`}
+                key={item.id}
+                style={{ '--conversation-color': item.color ? CONVERSATION_COLOR_VALUES[item.color] : 'var(--c-brand)' } as React.CSSProperties}
+              >
+                <span className="conversation-marker" aria-hidden="true" />
+                {conversationEditingId === item.id ? (
+                  <div className="conversation-edit">
+                    <input
+                      autoFocus
+                      maxLength={120}
+                      value={conversationTitleDraft}
+                      onChange={(e) => setConversationTitleDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') saveConversationTitle(item.id)
+                        if (e.key === 'Escape') cancelRenameConversation()
+                      }}
+                    />
+                    <button disabled={!conversationTitleDraft.trim()} onClick={() => saveConversationTitle(item.id)} title={t.save as string} type="button"><Icon name="check" size={13} /></button>
+                    <button onClick={cancelRenameConversation} title={t.cancel as string} type="button"><Icon name="x" size={13} /></button>
+                  </div>
+                ) : (
+                  <>
+                    <button className="conversation-title" disabled={busy} onClick={() => selectConversation(item.id)} onDoubleClick={() => beginRenameConversation(item)} title={item.title} type="button">{item.title}</button>
+                    <button className="conversation-menu-button" aria-expanded={conversationMenuId === item.id} disabled={busy} onClick={() => setConversationMenuId((current) => current === item.id ? '' : item.id)} title={language === 'zh-CN' ? '对话操作' : 'Conversation actions'} type="button"><Icon name="more" size={14} /></button>
+                  </>
+                )}
+                {conversationMenuId === item.id && (
+                  <div className="conversation-tools">
+                    <button disabled={busy} onClick={() => beginRenameConversation(item)} title={t.renameConversation as string} type="button"><Icon name="edit" size={14} /></button>
+                    <span className="conversation-palette" title={t.colorConversation as string}>
+                      <Icon name="palette" size={14} />
+                      {CONVERSATION_COLORS.map((color) => (
+                        <button
+                          aria-label={`${t.colorConversation}: ${color}`}
+                          className={`color-swatch ${item.color === color ? 'selected' : ''}`}
+                          disabled={busy}
+                          key={color}
+                          onClick={() => setConversationColor(item.id, color)}
+                          style={{ backgroundColor: CONVERSATION_COLOR_VALUES[color] }}
+                          type="button"
+                        />
+                      ))}
+                      <button className="clear-color" disabled={busy} onClick={() => setConversationColor(item.id, '')} title={t.clearColor as string} type="button"><Icon name="x" size={12} /></button>
+                    </span>
+                    <button className="mini-danger" disabled={busy} onClick={() => deleteConversation(item.id)} title={t.deleteConversation as string} type="button"><Icon name="trash" size={14} /></button>
+                  </div>
+                )}
               </div>
             ))}
           </div>
         </div>
 
-        <div className="nav-section">
-          <SectionHeader icon="bot" title={language === 'zh-CN' ? '模型' : 'Models'} />
-          <button className="button secondary full" onClick={saveCurrentModelPreset} type="button"><Icon name="file-plus" size={14} />{language === 'zh-CN' ? '保存当前模型' : 'Save current model'}</button>
-          <div className="list-stack">
-            {models.slice(0, 6).map((item) => (
-              <div className={`list-row ${item.id === activeModelId ? 'active' : ''}`} key={item.id}>
-                <button onClick={() => selectModelPreset(item.id)} title={`${item.provider} · ${item.model}`} type="button">{item.name}</button>
-                <button className="mini-danger" onClick={() => deleteModelPreset(item.id)} title="delete" type="button">×</button>
+        <div className="nav-section nav-utilities">
+          <SectionHeader icon="layout" title={language === 'zh-CN' ? '资源与工具' : 'Resources & tools'} onClick={() => setUtilitiesOpen((open) => !open)} open={utilitiesOpen} />
+          {utilitiesOpen && (
+            <div className="utility-stack">
+              <div className="utility-group">
+                <div className="utility-label"><Icon name="bot" size={14} /><span>{language === 'zh-CN' ? '模型' : 'Models'}</span></div>
+                <button className="button secondary full" onClick={saveCurrentModelPreset} type="button"><Icon name="file-plus" size={14} />{language === 'zh-CN' ? '保存当前模型' : 'Save current model'}</button>
+                <div className="list-stack">
+                  {models.slice(0, 6).map((item) => (
+                    <div className={`list-row ${item.id === activeModelId ? 'active' : ''}`} key={item.id}>
+                      <button onClick={() => selectModelPreset(item.id)} title={`${item.provider} · ${item.model}`} type="button">{item.name}</button>
+                      <button aria-label={language === 'zh-CN' ? '删除模型' : 'Delete model'} className="mini-danger" onClick={() => deleteModelPreset(item.id)} title={language === 'zh-CN' ? '删除模型' : 'Delete model'} type="button"><Icon name="trash" size={14} /></button>
+                    </div>
+                  ))}
+                </div>
               </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="nav-section">
-          <SectionHeader icon="file-plus" title={t.files} />
-          <ActionButton icon="file-plus" onClick={() => importPath('file')}>{t.importFile}</ActionButton>
-          <ActionButton icon="folder-plus" onClick={() => importPath('directory')}>{t.importFolder}</ActionButton>
-        </div>
-
-        <div className="nav-section">
-          <SectionHeader icon="search" title={t.search} />
-          <div className="search-box">
-            <div className="input-shell">
-              <Icon name="search" size={16} />
-              <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && searchIndex()} placeholder={t.searchIndexedFiles as string} />
+              <div className="utility-group">
+                <div className="utility-label"><Icon name="file-plus" size={14} /><span>{t.files}</span></div>
+                <ActionButton icon="file-plus" onClick={() => importPath('file')}>{t.importFile}</ActionButton>
+                <ActionButton icon="folder-plus" onClick={() => importPath('directory')}>{t.importFolder}</ActionButton>
+              </div>
+              <div className="utility-group">
+                <div className="utility-label"><Icon name="search" size={14} /><span>{t.search}</span></div>
+                <div className="search-box">
+                  <div className="input-shell">
+                    <Icon name="search" size={16} />
+                    <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && searchIndex()} placeholder={t.searchIndexedFiles as string} />
+                  </div>
+                  <button className="button secondary" onClick={searchIndex} type="button"><Icon name="search" size={16} />{t.search}</button>
+                </div>
+              </div>
             </div>
-            <button className="button secondary" onClick={searchIndex} type="button"><Icon name="search" size={16} />{t.search}</button>
-          </div>
+          )}
+        </div>
         </div>
 
         <div className="status-card">
@@ -1210,12 +1819,12 @@ function App() {
         <header className="topbar">
           <div className="topbar-title">
             <span className="eyebrow">{t.currentTask}</span>
-            <h2>{busy ? t.agentWorking : t.askHoya}</h2>
+            <h2>{activeConversationTitle || (language === 'zh-CN' ? '新任务' : 'New task')}</h2>
           </div>
           <div className="topbar-actions">
             <span className={`run-state ${busy ? 'busy' : safeStatus.ok ? 'ready' : 'error'}`}>
               <Icon name={busy ? 'activity' : safeStatus.ok ? 'check' : 'alert'} size={14} />
-              {busy ? t.running : safeStatus.ok ? t.ready : t.notReady}
+              {stopping ? t.stopping : busy ? t.running : safeStatus.ok ? t.ready : t.notReady}
             </span>
             <label className="language-select">
               <Icon name="language" size={15} />
@@ -1225,21 +1834,35 @@ function App() {
                 <option value="en-US">{t.english}</option>
               </select>
             </label>
-            <label className="switch-row">
-              <input type="checkbox" checked={showToolDetails} onChange={(e) => setShowToolDetails(e.target.checked)} />
-              <span className="switch-track"><span /></span>
-              <span>{t.showToolOutput}</span>
-            </label>
+            <button aria-label={t.showToolOutput as string} aria-pressed={showToolDetails} className={`icon-button tool-output-toggle ${showToolDetails ? 'active' : ''}`} onClick={() => setShowToolDetails((shown) => !shown)} title={t.showToolOutput as string} type="button"><Icon name="terminal" /></button>
+            <button
+              aria-label={inspectorOpen ? (language === 'zh-CN' ? '关闭运行面板' : 'Close run panel') : (language === 'zh-CN' ? '打开运行面板' : 'Open run panel')}
+              aria-pressed={inspectorOpen}
+              className={`icon-button inspector-toggle ${inspectorOpen ? 'active' : ''}`}
+              onClick={() => setInspectorOpen((open) => !open)}
+              title={language === 'zh-CN' ? '运行面板' : 'Run panel'}
+              type="button"
+            >
+              <Icon name="layout" />
+            </button>
+            <div className="window-controls">
+              <button aria-label={language === 'zh-CN' ? '最小化窗口' : 'Minimize window'} className="window-control" onClick={() => desktopBridge.windowMinimize()} title={language === 'zh-CN' ? '最小化' : 'Minimize'} type="button"><Icon name="minimize" size={16} /></button>
+              <button aria-label={windowMaximized ? (language === 'zh-CN' ? '还原窗口' : 'Restore window') : (language === 'zh-CN' ? '最大化窗口' : 'Maximize window')} className="window-control" onClick={async () => setWindowMaximized(await desktopBridge.windowToggleMaximize())} title={windowMaximized ? (language === 'zh-CN' ? '还原' : 'Restore') : (language === 'zh-CN' ? '最大化' : 'Maximize')} type="button"><Icon name={windowMaximized ? 'copy' : 'maximize'} size={15} /></button>
+              <button aria-label={language === 'zh-CN' ? '关闭窗口' : 'Close window'} className="window-control close" onClick={() => desktopBridge.windowClose()} title={language === 'zh-CN' ? '关闭' : 'Close'} type="button"><Icon name="x" size={17} /></button>
+            </div>
           </div>
         </header>
 
         <section className="chat">
           {messages.length === 0 && (
             <div className="empty-state">
-              <div className="empty-mark"><Icon name="sparkles" size={26} /></div>
-              <span className="eyebrow">{t.quickStart}</span>
               <h3>{t.startLocalTask}</h3>
-              <p>{t.emptyStateDescription}</p>
+              <button className="workspace-selector" onClick={chooseWorkspace} title={safeStatus.workspace} type="button">
+                <Icon name="folder-open" size={16} />
+                <span>{safeStatus.workspace}</span>
+                <Icon name="chevron-right" size={14} />
+              </button>
+              <TaskComposer embedded />
               <div className="quick-grid">
                 {quickPrompts.map((item) => (
                   <button className="quick-card" key={item.title} onClick={() => fillQuickPrompt(item.prompt)} type="button">
@@ -1253,25 +1876,16 @@ function App() {
           {messages.map((message, index) => <MessageCard key={index} message={message} />)}
           <div ref={chatEndRef} />
         </section>
-        <section className="composer">
-          <div className="composer-shell">
-            <textarea value={task} onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitTask() } }} placeholder={t.describeTask as string} />
-            <div className="composer-hints">
-              <span><Icon name="keyboard" size={13} />{t.enterToSend}</span>
-              <span>{t.shiftEnterNewline}</span>
-            </div>
-          </div>
-          <button className="send-button" disabled={!canSend} onClick={submitTask} type="button">
-            <Icon name="send" size={18} />
-            <span>{busy ? t.running : t.send}</span>
-          </button>
-        </section>
+        {messages.length > 0 && <TaskComposer />}
       </main>
 
-      <aside className="inspector">
+      <aside aria-hidden={!inspectorOpen} className={`inspector ${inspectorOpen ? 'open' : 'closed'}`}>
         <div className="inspector-head">
-          <span className="eyebrow">{t.inspector}</span>
-          <h2>{inspectorTab === 'run' ? t.activityStream : inspectorTab === 'approvals' ? t.pendingDiffs : inspectorTab === 'memory' ? (language === 'zh-CN' ? '记忆' : 'Memory') : inspectorTab === 'history' ? t.recentConversation : t.searchPreview}</h2>
+          <div>
+            <span className="eyebrow">{t.inspector}</span>
+            <h2>{inspectorTab === 'run' ? t.activityStream : inspectorTab === 'approvals' ? t.pendingDiffs : inspectorTab === 'memory' ? (language === 'zh-CN' ? '记忆' : 'Memory') : inspectorTab === 'history' ? t.recentConversation : t.searchPreview}</h2>
+          </div>
+          <button aria-label={language === 'zh-CN' ? '关闭运行面板' : 'Close run panel'} className="icon-button inspector-close" onClick={() => setInspectorOpen(false)} title={language === 'zh-CN' ? '关闭' : 'Close'} type="button"><Icon name="x" /></button>
         </div>
         <div className="inspector-tabs" role="tablist" aria-label={t.inspector as string}>
           <InspectorTabButton tab="run" icon="activity" label={t.runTab} count={activities.length} />
@@ -1284,7 +1898,38 @@ function App() {
         <div className="inspector-body" role="tabpanel" aria-labelledby={`tab-${inspectorTab}`}>
           {inspectorTab === 'run' && (
             <div className="panel scroll trace-panel">
-              {activities.length === 0 ? <EmptyPanel icon="activity" title={t.toolTrace} description={t.noActivity} /> : activities.map((item, index) => (
+              {currentRun && (
+                <section className="run-summary" aria-label={language === 'zh-CN' ? '任务运行计划' : 'Task run plan'}>
+                  <div className="run-summary-head">
+                    <div>
+                      <small>RUN {currentRun.id.slice(0, 8)}</small>
+                      <b>{currentRun.task}</b>
+                    </div>
+                    <span className={`run-status status-${currentRun.status}`}>{currentRun.status}</span>
+                  </div>
+                  {currentRun.context_summary && <p className="context-summary"><Icon name="search" size={14} />{currentRun.context_summary}</p>}
+                  <ol className="run-plan">
+                    {(currentRun.plan ?? []).map((item) => (
+                      <li className={`plan-${item.status}`} key={item.id}>
+                        <span className="plan-marker"><Icon name={item.status === 'completed' ? 'check' : item.status === 'failed' ? 'alert' : 'clock'} size={13} /></span>
+                        <div><b>{item.title}</b>{item.note && <small>{item.note}</small>}</div>
+                      </li>
+                    ))}
+                  </ol>
+                  {(currentRun.changes ?? []).length > 0 && (
+                    <div className="run-changes">
+                      <small>{language === 'zh-CN' ? '局部版本' : 'Local versions'}</small>
+                      {(currentRun.changes ?? []).map((change) => (
+                        <div className="run-change" key={change.version_id}>
+                          <span><Icon name={change.verification?.ok ? 'check' : 'alert'} size={14} /><b>{change.path}</b><small>{change.rolled_back_at ? (language === 'zh-CN' ? '已回滚' : 'Rolled back') : change.verification?.summary}</small></span>
+                          <button aria-label={language === 'zh-CN' ? `回滚 ${change.path}` : `Roll back ${change.path}`} className="icon-button" disabled={busy || Boolean(change.rolled_back_at)} onClick={() => rollbackVersion(change.version_id)} title={language === 'zh-CN' ? '回滚此版本' : 'Roll back this version'} type="button"><Icon name="rollback" size={15} /></button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
+              {activities.length === 0 && !currentRun ? <EmptyPanel icon="activity" title={t.toolTrace} description={t.noActivity} /> : activities.map((item, index) => (
                 <div key={index} className="activity">
                   <span className="timeline-icon"><Icon name={activityIcon(item.kind)} size={14} /></span>
                   <div>
@@ -1308,8 +1953,8 @@ function App() {
                   {item.command && <pre>{item.command}</pre>}
                   {item.diff && <pre>{item.diff}</pre>}
                   <div className="pending-actions">
-                    <button className="button primary compact" onClick={() => applyPending(item.id)} type="button"><Icon name="check" size={14} />{item.operation === 'run_powershell' ? (language === 'zh-CN' ? '执行' : 'Execute') : t.apply}</button>
-                    <button className="button ghost compact" onClick={() => denyPending(item.id)} type="button">{language === 'zh-CN' ? '拒绝' : 'Deny'}</button>
+                    <button className="button primary compact" disabled={busy || Boolean(approvalBusyId)} onClick={() => applyPending(item.id)} type="button"><Icon name={approvalBusyId === item.id ? 'clock' : 'check'} size={14} />{approvalBusyId === item.id ? (language === 'zh-CN' ? '处理中' : 'Working') : item.operation === 'run_powershell' ? (language === 'zh-CN' ? '执行' : 'Execute') : t.apply}</button>
+                    <button className="button ghost compact" disabled={busy || Boolean(approvalBusyId)} onClick={() => denyPending(item.id)} type="button"><Icon name="x" size={14} />{language === 'zh-CN' ? '拒绝' : 'Deny'}</button>
                   </div>
                 </div>
               ))}

@@ -4,6 +4,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +24,17 @@ class UserSettingsStore:
 
     def load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"models": [], "active_model_id": "", "last_workspace": ""}
+            return {"models": [], "active_model_id": "", "last_workspace": "", "projects": []}
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
-            return {"models": [], "active_model_id": "", "last_workspace": ""}
+            return {"models": [], "active_model_id": "", "last_workspace": "", "projects": []}
         if not isinstance(data, dict):
-            return {"models": [], "active_model_id": "", "last_workspace": ""}
+            return {"models": [], "active_model_id": "", "last_workspace": "", "projects": []}
         data.setdefault("models", [])
         data.setdefault("active_model_id", "")
         data.setdefault("last_workspace", "")
+        data.setdefault("projects", [])
         return data
 
     def save(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -42,6 +44,38 @@ class UserSettingsStore:
 
     def list_models(self) -> list[dict[str, Any]]:
         return [item for item in self.load().get("models", []) if isinstance(item, dict)]
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        projects = [item for item in self.load().get("projects", []) if isinstance(item, dict) and item.get("path")]
+        return sorted(projects, key=lambda item: item.get("updated_at", ""), reverse=True)
+
+    def remember_project(self, project_path: Path, name: str | None = None) -> dict[str, Any]:
+        data = self.load()
+        projects = self.list_projects()
+        resolved = project_path.expanduser().resolve()
+        now = datetime.now().isoformat(timespec="seconds")
+        normalized_path = os.path.normcase(str(resolved))
+        selected: dict[str, Any] | None = None
+        for project in projects:
+            if os.path.normcase(str(project.get("path", ""))) == normalized_path:
+                project["name"] = (name or str(project.get("name", "")) or resolved.name or str(resolved)).strip()
+                project["path"] = str(resolved)
+                project["updated_at"] = now
+                selected = project
+                break
+        if selected is None:
+            selected = {
+                "id": uuid.uuid4().hex[:10],
+                "name": (name or resolved.name or str(resolved)).strip(),
+                "path": str(resolved),
+                "created_at": now,
+                "updated_at": now,
+            }
+            projects.append(selected)
+        data["projects"] = projects
+        data["last_workspace"] = str(resolved)
+        self.save(data)
+        return selected
 
     def upsert_model(self, model: dict[str, Any]) -> dict[str, Any]:
         data = self.load()

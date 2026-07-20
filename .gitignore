@@ -3,6 +3,7 @@
 **/.env
 
 # Hoya local runtime state
+.hoya/
 .hoya_*.json
 .hoya_*.jsonl
 imports/
@@ -24,15 +25,18 @@ desktop/yarn-debug.log*
 desktop/yarn-error.log*
 dist-backend/
 build/
+artifacts/
 *.spec
 
 # Temporary/imported local files
 _desktop_import/
 _tmp_desktop_docs/
 desktop_1*.docx
+archive/
 
-# Claude config
+# Local agent/tool config
 .claude/
+.codex/
 .git_broken_*/
 
 # Local study assistant runtime artifacts

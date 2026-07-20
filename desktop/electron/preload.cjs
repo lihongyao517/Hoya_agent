@@ -9,6 +9,15 @@ contextBridge.exposeInMainWorld('hoya', {
     ipcRenderer.on('hoya:language-changed', listener)
     return () => ipcRenderer.removeListener('hoya:language-changed', listener)
   },
+  windowMinimize: () => ipcRenderer.invoke('hoya:window-minimize'),
+  windowToggleMaximize: () => ipcRenderer.invoke('hoya:window-toggle-maximize'),
+  windowIsMaximized: () => ipcRenderer.invoke('hoya:window-is-maximized'),
+  windowClose: () => ipcRenderer.invoke('hoya:window-close'),
+  onWindowMaximizedChanged: (callback) => {
+    const listener = (_event, maximized) => callback(maximized)
+    ipcRenderer.on('hoya:window-maximized-changed', listener)
+    return () => ipcRenderer.removeListener('hoya:window-maximized-changed', listener)
+  },
   selectDirectory: () => ipcRenderer.invoke('hoya:select-directory'),
   selectFile: () => ipcRenderer.invoke('hoya:select-file'),
 })

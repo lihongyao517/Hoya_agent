@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Menu, Tray } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn } = require('node:child_process')
@@ -10,6 +10,40 @@ const supportedLanguages = new Set(['zh-CN', 'en-US'])
 const windows = new Set()
 let currentLanguage = 'zh-CN'
 let backend = null
+let mainWindow = null
+let tray = null
+let isQuitting = false
+let backgroundNoticeShown = false
+
+function applyDwmCornerPreference(win) {
+  if (process.platform !== 'win32' || win.isDestroyed()) return
+
+  const handle = win.getNativeWindowHandle()
+  const handleValue = handle.length >= 8 ? handle.readBigUInt64LE(0).toString() : handle.readUInt32LE(0).toString()
+  const command = [
+    '$ErrorActionPreference = "Stop"',
+    'Add-Type @\'',
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'public static class HoyaDwm {',
+    '  [DllImport("dwmapi.dll")]',
+    '  public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);',
+    '}',
+    '\'@',
+    `$hwnd = [IntPtr]([UInt64]${handleValue})`,
+    '$cornerPreference = 2',
+    '[HoyaDwm]::DwmSetWindowAttribute($hwnd, 33, [ref]$cornerPreference, 4) | Out-Null',
+  ].join('\n')
+
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', command], {
+    windowsHide: true,
+    stdio: 'ignore',
+  })
+  child.on('error', (error) => console.warn(`[hoya-desktop] failed to set DWM corner preference: ${error}`))
+  child.on('exit', (code) => {
+    if (code !== 0) console.warn(`[hoya-desktop] DWM corner preference exited with code ${code}`)
+  })
+}
 
 function projectRoot() {
   return path.resolve(__dirname, '..', '..')
@@ -84,52 +118,46 @@ function saveLanguage(language) {
   }
 }
 
-function buildApplicationMenu() {
-  const zh = currentLanguage === 'zh-CN'
-  const template = [
-    {
-      label: 'Hoya Agent',
-      submenu: [
-        { role: 'quit', label: zh ? '退出' : 'Quit' },
-      ],
-    },
-    {
-      label: zh ? '语言' : 'Language',
-      submenu: [
-        {
-          label: '中文',
-          type: 'radio',
-          checked: currentLanguage === 'zh-CN',
-          click: () => setLanguage('zh-CN'),
-        },
-        {
-          label: 'English',
-          type: 'radio',
-          checked: currentLanguage === 'en-US',
-          click: () => setLanguage('en-US'),
-        },
-      ],
-    },
-    {
-      label: zh ? '视图' : 'View',
-      submenu: [
-        { role: 'reload', label: zh ? '重新加载' : 'Reload' },
-        { role: 'toggleDevTools', label: zh ? '切换开发者工具' : 'Toggle Developer Tools' },
-      ],
-    },
-  ]
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
-}
-
 function setLanguage(language) {
   if (!supportedLanguages.has(language)) return currentLanguage
   currentLanguage = language
   saveLanguage(language)
-  buildApplicationMenu()
   for (const win of windows) {
     if (!win.isDestroyed()) win.webContents.send('hoya:language-changed', currentLanguage)
   }
+  rebuildTrayMenu()
   return currentLanguage
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+function rebuildTrayMenu() {
+  if (!tray) return
+  const zh = currentLanguage === 'zh-CN'
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: zh ? '打开 Hoya Agent' : 'Open Hoya Agent', click: showMainWindow },
+    { type: 'separator' },
+    {
+      label: zh ? '退出' : 'Quit',
+      click: () => {
+        isQuitting = true
+        app.quit()
+      },
+    },
+  ]))
+}
+
+function createTray() {
+  if (tray) return
+  tray = new Tray(path.join(__dirname, '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'))
+  tray.setToolTip('Hoya Agent')
+  tray.on('double-click', showMainWindow)
+  rebuildTrayMenu()
 }
 
 function createWindow() {
@@ -138,18 +166,54 @@ function createWindow() {
     height: 820,
     minWidth: 980,
     minHeight: 640,
+    frame: false,
+    thickFrame: false,
+    show: false,
     title: 'Hoya Agent',
     icon: path.join(__dirname, '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
-    backgroundColor: '#090b10',
-    titleBarStyle: 'hiddenInset',
+    backgroundColor: '#f7f9f8',
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
+  mainWindow = win
   windows.add(win)
-  win.on('closed', () => windows.delete(win))
+  win.on('close', (event) => {
+    if (isQuitting) return
+    event.preventDefault()
+    win.hide()
+    if (tray && !backgroundNoticeShown && process.platform === 'win32') {
+      tray.displayBalloon({
+        title: 'Hoya Agent',
+        content: currentLanguage === 'zh-CN' ? 'Hoya Agent 正在后台运行。' : 'Hoya Agent is still running in the background.',
+        iconType: 'info',
+      })
+      backgroundNoticeShown = true
+    }
+  })
+  win.on('closed', () => {
+    windows.delete(win)
+    if (mainWindow === win) mainWindow = null
+  })
+  const sendMaximizedState = () => {
+    if (!win.isDestroyed()) {
+      win.webContents.send('hoya:window-maximized-changed', win.isMaximized())
+    }
+  }
+  const applyRoundedCorners = () => {
+    applyDwmCornerPreference(win)
+    sendMaximizedState()
+  }
+  win.on('maximize', applyRoundedCorners)
+  win.on('unmaximize', applyRoundedCorners)
+  win.on('restore', applyRoundedCorners)
+  win.on('resize', sendMaximizedState)
+  win.once('ready-to-show', () => {
+    win.show()
+    applyRoundedCorners()
+  })
 
   if (isDev) {
     win.loadURL('http://127.0.0.1:5173')
@@ -178,11 +242,22 @@ function startBackend() {
 
 app.whenReady().then(() => {
   loadLanguage()
-  buildApplicationMenu()
+  Menu.setApplicationMenu(null)
   startBackend()
+  createTray()
   ipcMain.handle('hoya:server-url', () => `http://${serverHost}:${serverPort}`)
   ipcMain.handle('hoya:get-language', () => currentLanguage)
   ipcMain.handle('hoya:set-language', (_event, language) => setLanguage(language))
+  ipcMain.handle('hoya:window-minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize())
+  ipcMain.handle('hoya:window-toggle-maximize', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
+  })
+  ipcMain.handle('hoya:window-is-maximized', (event) => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false)
+  ipcMain.handle('hoya:window-close', (event) => BrowserWindow.fromWebContents(event.sender)?.close())
   ipcMain.handle('hoya:select-directory', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (result.canceled || result.filePaths.length === 0) return null
@@ -196,13 +271,27 @@ app.whenReady().then(() => {
   createWindow()
 })
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+const singleInstanceLock = app.requestSingleInstanceLock()
+if (!singleInstanceLock) app.quit()
+
+app.on('second-instance', () => {
+  showMainWindow()
+})
+
+app.on('activate', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) showMainWindow()
+  else createWindow()
 })
 
 app.on('before-quit', () => {
+  isQuitting = true
   if (backend) {
     backend.kill()
     backend = null
   }
+})
+
+app.on('will-quit', () => {
+  tray?.destroy()
+  tray = null
 })

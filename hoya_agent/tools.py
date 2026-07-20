@@ -13,6 +13,7 @@ from xml.etree import ElementTree
 import difflib
 
 from .memory import MemoryStore
+from .run_state import ChangeStore
 from .workspace_ops import build_index, search_index
 
 
@@ -34,7 +35,24 @@ TEXT_EXTENSIONS = {
     ".ts",
 }
 
-SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", ".pytest_cache", "node_modules"}
+SKIP_DIRS = {
+    ".agents",
+    ".claude",
+    ".codex",
+    ".git",
+    ".hoya",
+    ".pytest_cache",
+    ".venv",
+    "__pycache__",
+    "archive",
+    "artifacts",
+    "build",
+    "dist",
+    "dist-backend",
+    "node_modules",
+    "release",
+    "venv",
+}
 SKIP_FILE_PREFIXES = (".hoya_",)
 
 
@@ -205,6 +223,7 @@ def build_tools(
     pending_writes_path: Path,
     require_write_approval: bool,
     require_shell_approval: bool,
+    change_store: ChangeStore | None = None,
 ) -> dict[str, Tool]:
     ws = Workspace(workspace)
 
@@ -247,6 +266,7 @@ def build_tools(
     def write_file(args: dict[str, Any]) -> Any:
         path = ws.resolve(args["path"])
         content = args["content"]
+        run_id = str(args.get("_hoya_run_id", ""))
         relative = ws.relative(path)
         risk = assess_write_risk(relative, content, path.exists())
         if require_write_approval:
@@ -270,6 +290,7 @@ def build_tools(
                     "content": content,
                     "diff": diff,
                     "risk": risk,
+                    "run_id": run_id,
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
             )
@@ -282,7 +303,10 @@ def build_tools(
                 "message": "Write is pending approval. Use /pending and /apply <id> in the TUI.",
                 "diff": diff,
                 "risk": risk,
+                "run_id": run_id,
             }
+        if change_store is not None:
+            return change_store.write_text(relative, content, run_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return {"ok": True, "path": relative, "bytes": len(content.encode("utf-8"))}
@@ -389,13 +413,16 @@ def build_tools(
         return memory.add(args["text"])
 
     def recall_memory(args: dict[str, Any]) -> Any:
-        return {"memory": memory.recent(int(args.get("limit", 8)))}
+        limit = int(args.get("limit", 8))
+        query = str(args.get("query", "")).strip()
+        return {"memory": memory.relevant(query, limit) if query else memory.recent(limit)}
 
     def run_powershell(args: dict[str, Any]) -> Any:
         if not allow_shell:
             return {"error": "shell execution is disabled. Set HOYA_ALLOW_SHELL=1 to enable it."}
         command = args["command"]
         timeout_seconds = int(args.get("timeout_seconds", 30))
+        run_id = str(args.get("_hoya_run_id", ""))
         risk = assess_shell_risk(command)
         if not risk.get("allowed", False):
             return {
@@ -413,6 +440,7 @@ def build_tools(
                     "command": command,
                     "timeout_seconds": timeout_seconds,
                     "risk": risk,
+                    "run_id": run_id,
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
             )
@@ -425,6 +453,7 @@ def build_tools(
                 "command": command,
                 "message": "Shell command is pending approval. Use /pending and /apply <id> in the TUI, or approve it in the desktop app.",
                 "risk": risk,
+                "run_id": run_id,
             }
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
@@ -600,10 +629,13 @@ def build_tools(
                 "type": "function",
                 "function": {
                     "name": "recall_memory",
-                    "description": "Read recent durable memories.",
+                    "description": "Recall durable memories relevant to the current task.",
                     "parameters": {
                         "type": "object",
-                        "properties": {"limit": {"type": "integer", "default": 8}},
+                        "properties": {
+                            "query": {"type": "string", "description": "Keywords describing the current task."},
+                            "limit": {"type": "integer", "default": 8},
+                        },
                     },
                 },
             },
@@ -630,11 +662,14 @@ def build_tools(
     }
 
 
-def run_tool(tools: dict[str, Tool], name: str, raw_args: str) -> str:
+def run_tool(tools: dict[str, Tool], name: str, raw_args: str, context: dict[str, Any] | None = None) -> str:
     if name not in tools:
         return _text_result({"error": f"unknown tool: {name}"})
     try:
         args = json.loads(raw_args or "{}")
+        if context:
+            for key, value in context.items():
+                args[f"_hoya_{key}"] = value
         return _text_result(tools[name].handler(args))
     except Exception as exc:
         return _text_result({"error": str(exc)})

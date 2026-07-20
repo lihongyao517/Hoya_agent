@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -40,3 +41,27 @@ class MemoryStore:
 
     def recent(self, limit: int = 8) -> list[dict[str, Any]]:
         return self.load()[-limit:]
+
+    def relevant(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        terms = _relevance_terms(query)
+        if not terms:
+            return []
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for index, entry in enumerate(self.load()):
+            text = str(entry.get("text", "")).lower()
+            score = sum((3 if term in text else 0) + text.count(term) for term in terms)
+            if score:
+                scored.append((score, index, entry))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [entry for _, _, entry in scored[: max(1, limit)]]
+
+
+def _relevance_terms(value: str) -> set[str]:
+    lowered = value.lower()
+    terms = set(re.findall(r"[a-z0-9_./-]{2,}", lowered))
+    for sequence in re.findall(r"[\u3400-\u9fff]+", lowered):
+        if len(sequence) <= 2:
+            terms.add(sequence)
+        else:
+            terms.update(sequence[index : index + 2] for index in range(len(sequence) - 1))
+    return {term for term in terms if term.strip()}

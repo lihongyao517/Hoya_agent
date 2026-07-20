@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Any
 
 
+CONVERSATION_COLORS = {"", "blue", "green", "amber", "red", "purple", "pink"}
+
+
 def timestamp() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -44,13 +47,20 @@ class ConversationStore:
         entries = self._load_index()
         if not entries:
             entries = [self.ensure_default()]
-        return sorted(entries, key=lambda item: item.get("updated_at", ""), reverse=True)
+        normalized = [
+            {**entry, "color": entry.get("color", ""), "kind": entry.get("kind", "task"), "status": entry.get("status", "open")}
+            for entry in entries
+        ]
+        return sorted(normalized, key=lambda item: item.get("updated_at", ""), reverse=True)
 
-    def create_conversation(self, title: str | None = None) -> dict[str, Any]:
+    def create_conversation(self, title: str | None = None, *, kind: str = "task") -> dict[str, Any]:
         now = timestamp()
         entry = {
             "id": uuid.uuid4().hex[:12],
             "title": title or "新对话",
+            "color": "",
+            "kind": kind,
+            "status": "open",
             "created_at": now,
             "updated_at": now,
         }
@@ -62,13 +72,37 @@ class ConversationStore:
         return entry
 
     def rename_conversation(self, conversation_id: str, title: str) -> dict[str, Any]:
+        return self.update_conversation(conversation_id, title=title)
+
+    def set_conversation_color(self, conversation_id: str, color: str) -> dict[str, Any]:
+        return self.update_conversation(conversation_id, color=color)
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        color: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_color = None if color is None else color.strip().lower()
+        if normalized_color is not None and normalized_color not in CONVERSATION_COLORS:
+            raise ValueError(f"unsupported conversation color: {normalized_color}")
+
         entries = self._load_index()
         for entry in entries:
             if entry.get("id") == conversation_id:
-                entry["title"] = title.strip() or entry.get("title") or "未命名对话"
+                if title is not None:
+                    entry["title"] = title.strip()[:120] or entry.get("title") or "未命名对话"
+                if normalized_color is not None:
+                    entry["color"] = normalized_color
                 entry["updated_at"] = timestamp()
                 self._save_index(entries)
-                return entry
+                return {
+                    **entry,
+                    "color": entry.get("color", ""),
+                    "kind": entry.get("kind", "task"),
+                    "status": entry.get("status", "open"),
+                }
         raise KeyError(f"conversation not found: {conversation_id}")
 
     def delete_conversation(self, conversation_id: str) -> None:
@@ -88,7 +122,7 @@ class ConversationStore:
         entries = self._load_index()
         for convo in entries:
             if convo.get("id") == conversation_id:
-                if role == "user" and (not convo.get("title") or convo.get("title") == "新对话"):
+                if role == "user" and (not convo.get("title") or convo.get("title") in {"新对话", "新任务", "New task"}):
                     convo["title"] = content.strip().splitlines()[0][:36] or "新对话"
                 convo["updated_at"] = timestamp()
                 break

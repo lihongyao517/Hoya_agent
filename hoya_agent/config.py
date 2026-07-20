@@ -6,10 +6,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 DEFAULT_LLM_PROVIDER = "openai-compatible"
+ANTHROPIC_PROVIDER = "anthropic"
+ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 OLLAMA_PROVIDER = "ollama"
 OLLAMA_DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
 OLLAMA_DEFAULT_MODEL = "qwen2.5-coder:7b"
-SUPPORTED_LLM_PROVIDERS = {DEFAULT_LLM_PROVIDER, OLLAMA_PROVIDER}
+SUPPORTED_LLM_PROVIDERS = {DEFAULT_LLM_PROVIDER, ANTHROPIC_PROVIDER, OLLAMA_PROVIDER}
 SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 REASONING_EFFORT_ALIASES = {"minimal": "low", "standard": "medium"}
 DEFAULT_REASONING_EFFORT = "medium"
@@ -23,6 +25,18 @@ API_CONFIG_KEYS = {
     "HOYA_REASONING_EFFORT",
     "HOYA_SHOW_REASONING",
 }
+
+
+def _migrate_workspace_state(workspace: Path, state_dir: Path, legacy_name: str, new_name: str) -> Path:
+    current = state_dir / new_name
+    legacy = workspace / legacy_name
+    if current.exists() or not legacy.exists():
+        return current
+    try:
+        legacy.replace(current)
+    except OSError:
+        return legacy
+    return current
 
 
 def dotenv_values(path: Path) -> dict[str, str]:
@@ -73,6 +87,9 @@ def _apply_provider_defaults(values: dict[str, str]) -> dict[str, str]:
         values["HOYA_BASE_URL"] = (values.get("HOYA_BASE_URL") or OLLAMA_DEFAULT_BASE_URL).rstrip("/")
         values["HOYA_MODEL"] = values.get("HOYA_MODEL") or OLLAMA_DEFAULT_MODEL
         values["HOYA_WIRE_API"] = "chat"
+    elif provider == ANTHROPIC_PROVIDER:
+        values["HOYA_BASE_URL"] = (values.get("HOYA_BASE_URL") or ANTHROPIC_DEFAULT_BASE_URL).rstrip("/")
+        values["HOYA_WIRE_API"] = "messages"
     return values
 
 
@@ -127,7 +144,7 @@ def validate_api_config_update(payload: dict, existing: dict[str, str]) -> tuple
     if _has_newline(provider):
         field_errors["provider"] = "Provider must not contain newlines."
     elif provider not in SUPPORTED_LLM_PROVIDERS:
-        field_errors["provider"] = "Provider must be either openai-compatible or ollama."
+        field_errors["provider"] = "Provider must be openai-compatible, anthropic, or ollama."
 
     if raw_api_key and _has_newline(raw_api_key):
         field_errors["api_key"] = "API key must not contain newlines."
@@ -138,6 +155,11 @@ def validate_api_config_update(payload: dict, existing: dict[str, str]) -> tuple
         if not model:
             model = OLLAMA_DEFAULT_MODEL
         wire_api = "chat"
+    elif provider == ANTHROPIC_PROVIDER:
+        base_url = base_url or ANTHROPIC_DEFAULT_BASE_URL
+        wire_api = "messages"
+        if not api_key:
+            field_errors["api_key"] = "API key is required for Anthropic providers."
     elif not api_key:
         field_errors["api_key"] = "API key is required for OpenAI-compatible providers."
 
@@ -157,10 +179,14 @@ def validate_api_config_update(payload: dict, existing: dict[str, str]) -> tuple
 
     if _has_newline(wire_api):
         field_errors["wire_api"] = "Wire API must not contain newlines."
-    elif wire_api not in {"chat", "responses"}:
-        field_errors["wire_api"] = "Wire API must be either chat or responses."
+    elif wire_api not in {"chat", "responses", "messages"}:
+        field_errors["wire_api"] = "Wire API must be chat, responses, or messages."
     elif provider == OLLAMA_PROVIDER and wire_api != "chat":
         field_errors["wire_api"] = "Ollama provider supports only chat wire API."
+    elif provider == ANTHROPIC_PROVIDER and wire_api != "messages":
+        field_errors["wire_api"] = "Anthropic provider supports only messages wire API."
+    elif provider == DEFAULT_LLM_PROVIDER and wire_api == "messages":
+        field_errors["wire_api"] = "OpenAI-compatible provider supports chat or responses wire API."
 
     if _has_newline(reasoning_effort):
         field_errors["reasoning_effort"] = "Reasoning effort must not contain newlines."
@@ -244,6 +270,11 @@ class Config:
     index_path: Path
     run_log_path: Path
     pending_writes_path: Path
+    conversations_index_path: Path
+    conversations_dir: Path
+    task_runs_path: Path
+    versions_index_path: Path
+    versions_dir: Path
 
     @classmethod
     def from_env(cls, workspace: Path | None = None, reload_dotenv: bool = False) -> "Config":
@@ -266,12 +297,17 @@ class Config:
         show_reasoning = env("HOYA_SHOW_REASONING", "1").strip() == "1"
 
         if provider not in SUPPORTED_LLM_PROVIDERS:
-            raise ValueError("HOYA_LLM_PROVIDER must be either openai-compatible or ollama.")
+            raise ValueError("HOYA_LLM_PROVIDER must be openai-compatible, anthropic, or ollama.")
 
         if provider == OLLAMA_PROVIDER:
             base_url = base_url or OLLAMA_DEFAULT_BASE_URL
             model = model or OLLAMA_DEFAULT_MODEL
             wire_api = "chat"
+        elif provider == ANTHROPIC_PROVIDER:
+            base_url = base_url or ANTHROPIC_DEFAULT_BASE_URL
+            wire_api = "messages"
+            if not api_key:
+                raise ValueError("Missing HOYA_API_KEY for Anthropic provider.")
         elif not api_key:
             raise ValueError("Missing HOYA_API_KEY for openai-compatible provider. For Ollama set HOYA_LLM_PROVIDER=ollama.")
 
@@ -279,10 +315,21 @@ class Config:
             raise ValueError("Missing HOYA_BASE_URL. Example: https://relay.example.com/v1")
         if not model:
             raise ValueError("Missing HOYA_MODEL. Example: gpt-4o-mini")
-        if wire_api not in {"chat", "responses"}:
-            raise ValueError("HOYA_WIRE_API must be either chat or responses.")
+        if wire_api not in {"chat", "responses", "messages"}:
+            raise ValueError("HOYA_WIRE_API must be chat, responses, or messages.")
+        if provider == DEFAULT_LLM_PROVIDER and wire_api == "messages":
+            raise ValueError("OpenAI-compatible provider supports chat or responses wire API.")
         if reasoning_effort not in SUPPORTED_REASONING_EFFORTS:
             raise ValueError("HOYA_REASONING_EFFORT must be low, medium, high, xhigh, or max.")
+
+        local_defaults = provider == OLLAMA_PROVIDER
+        max_steps_default = "4" if local_defaults else "8"
+        history_limit_default = "4" if local_defaults else "12"
+        history_chars_default = "1200" if local_defaults else "4000"
+        tool_result_default = "4000" if local_defaults else "12000"
+
+        state_dir = workspace / ".hoya"
+        state_dir.mkdir(parents=True, exist_ok=True)
 
         return cls(
             provider=provider,
@@ -293,19 +340,30 @@ class Config:
             temperature=float(env("HOYA_TEMPERATURE", "0.2")),
             reasoning_effort=reasoning_effort,
             show_reasoning=show_reasoning,
-            max_steps=int(env("HOYA_MAX_STEPS", "8")),
-            history_context_limit=int(env("HOYA_HISTORY_CONTEXT_LIMIT", "12")),
-            history_entry_max_chars=int(env("HOYA_HISTORY_ENTRY_MAX_CHARS", "4000")),
-            tool_result_max_chars=int(env("HOYA_TOOL_RESULT_MAX_CHARS", "12000")),
+            max_steps=int(env("HOYA_MAX_STEPS", max_steps_default)),
+            history_context_limit=int(env("HOYA_HISTORY_CONTEXT_LIMIT", history_limit_default)),
+            history_entry_max_chars=int(env("HOYA_HISTORY_ENTRY_MAX_CHARS", history_chars_default)),
+            tool_result_max_chars=int(env("HOYA_TOOL_RESULT_MAX_CHARS", tool_result_default)),
             allow_shell=env("HOYA_ALLOW_SHELL", "0").strip() == "1",
             allow_desktop=env("HOYA_ALLOW_DESKTOP", "0").strip() == "1",
             require_write_approval=env("HOYA_REQUIRE_WRITE_APPROVAL", "0").strip() == "1",
             require_shell_approval=env("HOYA_REQUIRE_SHELL_APPROVAL", "1").strip() == "1",
             workspace=workspace,
-            memory_path=workspace / ".hoya_memory.json",
-            history_path=workspace / ".hoya_history.jsonl",
+            memory_path=_migrate_workspace_state(workspace, state_dir, ".hoya_memory.json", "memory.json"),
+            history_path=_migrate_workspace_state(workspace, state_dir, ".hoya_history.jsonl", "history.jsonl"),
             imports_dir=workspace / "imports",
-            index_path=workspace / ".hoya_index.json",
-            run_log_path=workspace / ".hoya_runs.jsonl",
-            pending_writes_path=workspace / ".hoya_pending_writes.json",
+            index_path=_migrate_workspace_state(workspace, state_dir, ".hoya_index.json", "index.json"),
+            run_log_path=_migrate_workspace_state(workspace, state_dir, ".hoya_runs.jsonl", "runs.jsonl"),
+            pending_writes_path=_migrate_workspace_state(
+                workspace, state_dir, ".hoya_pending_writes.json", "pending_writes.json"
+            ),
+            conversations_index_path=_migrate_workspace_state(
+                workspace, state_dir, ".hoya_conversations.json", "conversations.json"
+            ),
+            conversations_dir=_migrate_workspace_state(
+                workspace, state_dir, ".hoya_conversations", "conversations"
+            ),
+            task_runs_path=state_dir / "task_runs.json",
+            versions_index_path=state_dir / "versions.json",
+            versions_dir=state_dir / "versions",
         )

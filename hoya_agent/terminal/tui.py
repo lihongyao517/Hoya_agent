@@ -27,9 +27,9 @@ class PromptTextArea(TextArea):
             return
         await super()._on_key(event)
 
-from .agent import HoyaAgent
-from .config import Config
-from .workspace_ops import (
+from ..agent import HoyaAgent
+from ..config import Config
+from ..workspace_ops import (
     HistoryStore,
     RunLog,
     apply_pending_operation,
@@ -160,6 +160,7 @@ class HoyaAgentApp(App[None]):
         self.narrow = False
         self.last_state = "启动中"
         self.show_tool_details = False
+        self.conversation_id = ""
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="messages")
@@ -185,6 +186,7 @@ class HoyaAgentApp(App[None]):
             self.agent = HoyaAgent(self.config)
             self.history = HistoryStore(self.config.history_path)
             self.run_log = RunLog(self.config.run_log_path)
+            self.conversation_id = self.agent.conversations.create_conversation("TUI 对话")["id"]
         except Exception as exc:
             task_input.disabled = True
             self.add_message("system", "Hoya Agent 配置错误", "error")
@@ -357,6 +359,8 @@ class HoyaAgentApp(App[None]):
         self.add_message("你", task, "user")
         if self.history is not None:
             self.history.append("user", task)
+        if self.agent is not None and self.conversation_id:
+            self.agent.conversations.append_message(self.conversation_id, "user", task)
         self.current_answer = ""
         self.current_assistant = None
         self.current_assistant_stamp = ""
@@ -372,14 +376,44 @@ class HoyaAgentApp(App[None]):
         try:
             if self.run_log is not None:
                 self.run_log.append({"type": "task_start", "task": task})
-            for event in self.agent.run_stream(task):
-                if self.run_log is not None and event.get("type") in {"status", "tool_start", "tool_result", "error", "done"}:
+            for event in self.agent.run_stream(task, conversation_id=self.conversation_id):
+                if self.run_log is not None and event.get("type") in {"status", "tool_start", "tool_result", "stale_repeat", "error", "done"}:
                     self.run_log.append({"type": "agent_event", "event": event})
                 self.call_from_thread(self.handle_agent_event, event)
         except Exception as exc:
             self.call_from_thread(self.handle_agent_event, {"type": "error", "text": str(exc)})
         finally:
             self.call_from_thread(self.finish_task)
+
+    @work(thread=True)
+    def resume_agent_task(self, run_id: str) -> None:
+        assert self.agent is not None
+        try:
+            if self.run_log is not None:
+                self.run_log.append({"type": "task_resume", "run_id": run_id})
+            for event in self.agent.resume_stream(run_id):
+                if self.run_log is not None and event.get("type") in {
+                    "status",
+                    "tool_start",
+                    "tool_result",
+                    "approval_required",
+                    "verification",
+                    "stale_repeat",
+                    "error",
+                    "done",
+                }:
+                    self.run_log.append({"type": "agent_event", "event": event, "run_id": run_id})
+                self.call_from_thread(self.handle_agent_event, event)
+        except Exception as exc:
+            self.call_from_thread(self.handle_agent_event, {"type": "error", "text": str(exc)})
+        finally:
+            self.call_from_thread(self.finish_task)
+
+    def begin_resume(self, run_id: str) -> None:
+        self.busy = True
+        self.set_activity("恢复任务")
+        self.refresh_status("运行中")
+        self.resume_agent_task(run_id)
 
     def handle_agent_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
@@ -405,6 +439,24 @@ class HoyaAgentApp(App[None]):
             text = str(event.get("text", "操作等待用户审批。"))
             pending_id = str(event.get("id", ""))
             self.add_event("approval", f"{text} id={pending_id}", css_class="tool")
+            return
+
+        if event_type == "context_summary":
+            self.add_event("context", str(event.get("text", "")), css_class="status")
+            return
+
+        if event_type == "verification":
+            change = event.get("change") or {}
+            verification = change.get("verification") or {}
+            self.add_event(
+                "verify",
+                f"{change.get('path', '')}: {verification.get('summary', '校验完成')}",
+                css_class="tool" if verification.get("ok") else "error",
+            )
+            return
+
+        if event_type == "stale_repeat":
+            self.add_event("context", str(event.get("text", "检测到可能复读，建议 /reset。")), css_class="status")
             return
 
         if event_type == "tool_start":
@@ -436,6 +488,8 @@ class HoyaAgentApp(App[None]):
                 self.update_assistant_message()
             if self.history is not None and self.current_answer:
                 self.history.append("assistant", self.current_answer)
+            if self.agent is not None and self.conversation_id and self.current_answer:
+                self.agent.conversations.append_message(self.conversation_id, "assistant", self.current_answer)
             self.set_activity("回答完成")
             return
 
@@ -469,6 +523,7 @@ class HoyaAgentApp(App[None]):
                 "/pending 查看待审批操作\n"
                 "/apply <id> 批准/执行待审批操作\n"
                 "/deny <id> 拒绝待审批操作\n"
+                "/reset 开始新上下文（保留长期记忆）\n"
                 "/tools 切换工具输出详情折叠/展开\n"
                 "/clear 清空界面",
                 "system",
@@ -477,6 +532,13 @@ class HoyaAgentApp(App[None]):
 
         if name == "/clear":
             self.action_clear_messages()
+            return
+
+        if name in {"/reset", "/new"}:
+            if self.agent is not None:
+                self.conversation_id = self.agent.conversations.create_conversation("TUI 对话")["id"]
+            self.action_clear_messages()
+            self.add_message("system", "已开始新上下文。长期记忆仍会保留。", "system")
             return
 
         if name == "/tools":
@@ -550,8 +612,17 @@ class HoyaAgentApp(App[None]):
                 self.config.pending_writes_path,
                 arg,
                 allow_shell=self.config.allow_shell,
+                change_store=self.agent.changes if self.agent is not None else None,
             )
-            if result.get("ok"):
+            run_id = str(result.get("run_id", ""))
+            if run_id and self.agent is not None and self.agent.runs.get(run_id) is not None:
+                if result.get("version_id"):
+                    self.agent._register_change(run_id, result)
+                self.agent.runs.resolve_approval(run_id, "approved", result)
+                label = result.get("path") or f"shell returncode={result.get('returncode')}"
+                self.add_message("system", f"已批准并执行: {label}；正在恢复原任务。", "system")
+                self.begin_resume(run_id)
+            elif result.get("ok"):
                 label = result.get("path") or f"shell returncode={result.get('returncode')}"
                 self.add_message("system", f"已批准并执行: {label}", "system")
             else:
@@ -563,7 +634,13 @@ class HoyaAgentApp(App[None]):
                 self.add_message("system", "用法：/deny <id>", "error")
                 return
             result = deny_pending_operation(self.config.pending_writes_path, arg)
-            if result.get("ok"):
+            run_id = str(result.get("run_id", ""))
+            if result.get("ok") and run_id and self.agent is not None and self.agent.runs.get(run_id) is not None:
+                denial = {**result, "ok": False, "denied": True, "error": "operation denied by user"}
+                self.agent.runs.resolve_approval(run_id, "denied", denial)
+                self.add_message("system", f"已拒绝待审批操作: {arg}；正在恢复原任务。", "system")
+                self.begin_resume(run_id)
+            elif result.get("ok"):
                 self.add_message("system", f"已拒绝待审批操作: {arg}", "system")
             else:
                 self.add_message("system", str(result.get("error")), "error")
