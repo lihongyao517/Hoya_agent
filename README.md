@@ -633,3 +633,11 @@ python -m pip install -r requirements.txt
 - 即使开启 Shell，也建议保留人工审批。
 - 对写入文件、执行命令、桌面写入等操作保持最小权限原则。
 - 不建议用于无人值守、高风险或跨目录自动化任务。
+
+## 隐私、许可证与代码签名
+
+- 本项目使用 [MIT License](LICENSE)。
+- 数据处理与联网行为见 [隐私政策](PRIVACY.md)。
+- Windows 正式版本使用 SignPath 流水线进行 Authenticode 签名，流程和维护者角色见 [代码签名政策](CODE_SIGNING_POLICY.md)。
+- SignPath 申请获批后的仓库配置步骤见 [签名配置指南](docs/SIGNPATH_SETUP.md)。
+- Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).

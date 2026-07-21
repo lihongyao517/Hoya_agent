@@ -1,6 +1,9 @@
 {
   "name": "hoya-agent-desktop",
-  "version": "1.1.1",
+  "version": "1.1.2",
+  "description": "Local AI workspace agent for Windows",
+  "author": "lihongyao517",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -36,6 +39,7 @@
   "build": {
     "appId": "com.hoya.agent.desktop",
     "productName": "Hoya Agent",
+    "copyright": "Copyright (c) 2026 lihongyao517",
     "directories": {
       "output": "../artifacts/desktop"
     },
