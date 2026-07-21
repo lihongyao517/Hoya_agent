@@ -14,5 +14,10 @@
              copyright="Copyright (c) 2026 lihongyao517">
       <authenticode-sign />
     </pe-file>
+    <pe-file path="squirrel-windows/Hoya-Agent-${version}-win32-x64-Setup.exe"
+             product-name="Hoya Agent" product-version="${version}" file-version="${version}"
+             company-name="lihongyao517" copyright="Copyright (c) 2026 lihongyao517">
+      <authenticode-sign />
+    </pe-file>
   </zip-file>
 </artifact-configuration>

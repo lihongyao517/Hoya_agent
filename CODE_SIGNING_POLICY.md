@@ -25,10 +25,13 @@ signing requests. Every production release requires manual SignPath approval.
 1. A version tag matching `v<major>.<minor>.<patch>` starts the release build.
 2. GitHub-hosted runners build the backend and Electron application.
 3. SignPath signs the Hoya Agent application and backend executables.
-4. Electron Builder creates the NSIS and portable packages from the signed app.
-5. SignPath signs both release executables.
+4. Electron Builder creates NSIS, portable, and Squirrel.Windows packages from
+   the signed app.
+5. SignPath signs all three release executables.
 6. The workflow rebuilds updater hashes and the blockmap from the signed NSIS
-   installer, verifies Authenticode signatures, and publishes the release.
+   installer, verifies Authenticode signatures, and publishes the release with
+   the Squirrel `RELEASES` manifest and NuGet package required by the official
+   Electron update service.
 
 Unsigned artifacts must not be attached to an official GitHub Release.
 

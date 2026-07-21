@@ -640,4 +640,5 @@ python -m pip install -r requirements.txt
 - 数据处理与联网行为见 [隐私政策](PRIVACY.md)。
 - Windows 正式版本使用 SignPath 流水线进行 Authenticode 签名，流程和维护者角色见 [代码签名政策](CODE_SIGNING_POLICY.md)。
 - SignPath 申请获批后的仓库配置步骤见 [签名配置指南](docs/SIGNPATH_SETUP.md)。
+- Windows 更新采用兼容双通道：已有 NSIS 安装继续使用 GitHub Release 元数据，新安装的 Squirrel.Windows 版本使用 Electron 官方免费服务 `update.electronjs.org`，安装包仍统一存放在 GitHub Releases。
 - Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).

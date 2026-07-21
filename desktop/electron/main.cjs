@@ -1,12 +1,20 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Tray, shell } = require('electron')
+const { app, autoUpdater: squirrelAutoUpdater, BrowserWindow, clipboard, dialog, ipcMain, Menu, Tray, shell } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn } = require('node:child_process')
-const { autoUpdater } = require('electron-updater')
+const { autoUpdater: nsisAutoUpdater } = require('electron-updater')
 const { RELEASES_URL, checkForUpdates: checkTagsForUpdates } = require('./update-service.cjs')
+const { electronPublicUpdateFeed, isSquirrelInstall, releaseVersion, squirrelAppUserModelId } = require('./updater-adapter.cjs')
+
+const handlingSquirrelStartupEvent = require('electron-squirrel-startup')
+if (handlingSquirrelStartupEvent) app.quit()
 
 const isDev = !app.isPackaged
-if (process.platform === 'win32') app.setAppUserModelId('com.hoya.agent.desktop')
+const usesSquirrelUpdater = app.isPackaged && process.platform === 'win32' && isSquirrelInstall(process.execPath)
+const autoUpdater = usesSquirrelUpdater ? squirrelAutoUpdater : nsisAutoUpdater
+if (process.platform === 'win32') {
+  app.setAppUserModelId(usesSquirrelUpdater ? squirrelAppUserModelId() : 'com.hoya.agent.desktop')
+}
 const serverHost = '127.0.0.1'
 const serverPort = process.env.HOYA_SERVER_PORT || '8787'
 const supportedLanguages = new Set(['zh-CN', 'en-US'])
@@ -19,6 +27,8 @@ let isQuitting = false
 let backgroundNoticeShown = false
 let updateCheckPromise = null
 let updateState = null
+let backgroundUpdateTimer = null
+let updateInstallInProgress = false
 const terminalRuns = new Map()
 const approvedWorkspacePaths = new Set()
 
@@ -411,29 +421,35 @@ function publishUpdateState(patch) {
 
 function configureAutoUpdater() {
   if (!app.isPackaged) return
-  autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
-  autoUpdater.autoRunAppAfterInstall = true
-  autoUpdater.allowPrerelease = false
+  if (usesSquirrelUpdater) {
+    autoUpdater.setFeedURL({ url: electronPublicUpdateFeed(app.getVersion()) })
+  } else {
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.autoRunAppAfterInstall = true
+    autoUpdater.allowPrerelease = false
+  }
 
   autoUpdater.on('checking-for-update', () => publishUpdateState({ ok: true, status: 'checking', error: undefined }))
   autoUpdater.on('update-available', (info) => publishUpdateState({
     ok: true,
     status: 'downloading',
-    latestVersion: info.version,
+    latestVersion: releaseVersion(info, '', currentUpdateState().latestVersion),
     updateAvailable: true,
     autoUpdateSupported: true,
-    progress: 0,
+    progress: usesSquirrelUpdater ? 25 : 0,
     error: undefined,
   }))
-  autoUpdater.on('download-progress', (progress) => publishUpdateState({
-    status: 'downloading',
-    progress: Math.max(0, Math.min(100, Math.round(progress.percent || 0))),
-  }))
-  autoUpdater.on('update-downloaded', (info) => publishUpdateState({
+  if (!usesSquirrelUpdater) {
+    autoUpdater.on('download-progress', (progress) => publishUpdateState({
+      status: 'downloading',
+      progress: Math.max(0, Math.min(100, Math.round(progress.percent || 0))),
+    }))
+  }
+  autoUpdater.on('update-downloaded', (info, _releaseNotes, releaseName) => publishUpdateState({
     ok: true,
     status: 'downloaded',
-    latestVersion: info.version,
+    latestVersion: releaseVersion(info, releaseName, currentUpdateState().latestVersion),
     updateAvailable: true,
     autoUpdateSupported: true,
     progress: 100,
@@ -442,7 +458,7 @@ function configureAutoUpdater() {
   autoUpdater.on('update-not-available', (info) => publishUpdateState({
     ok: true,
     status: 'not-available',
-    latestVersion: info.version || app.getVersion(),
+    latestVersion: releaseVersion(info, '', app.getVersion()),
     updateAvailable: false,
     autoUpdateSupported: true,
     progress: 0,
@@ -452,6 +468,17 @@ function configureAutoUpdater() {
     console.warn(`[hoya-desktop] automatic update failed: ${error}`)
     publishUpdateState({ ok: false, status: 'error', error: error instanceof Error ? error.message : String(error) })
   })
+  autoUpdater.on('before-quit-for-update', () => {
+    updateInstallInProgress = true
+    isQuitting = true
+    stopBackgroundProcesses()
+  })
+
+  setTimeout(() => checkDesktopUpdates().catch((error) => console.warn(`[hoya-desktop] initial update check failed: ${error}`)), 15000)
+  backgroundUpdateTimer = setInterval(() => {
+    checkDesktopUpdates().catch((error) => console.warn(`[hoya-desktop] scheduled update check failed: ${error}`))
+  }, 10 * 60 * 1000)
+  backgroundUpdateTimer.unref?.()
 }
 
 async function checkDesktopUpdates() {
@@ -462,6 +489,20 @@ async function checkDesktopUpdates() {
       return publishUpdateState({ ok: true, status: 'not-available', latestVersion: app.getVersion(), updateAvailable: false, autoUpdateSupported: false })
     }
     try {
+      if (usesSquirrelUpdater) {
+        try {
+          const tagState = await checkTagsForUpdates(app.getVersion())
+          publishUpdateState({
+            ...tagState,
+            status: 'checking',
+            autoUpdateSupported: true,
+            progress: 0,
+            error: undefined,
+          })
+        } catch {
+          publishUpdateState({ status: 'checking', autoUpdateSupported: true, progress: 0, error: undefined })
+        }
+      }
       await autoUpdater.checkForUpdates()
       return currentUpdateState()
     } catch (automaticError) {
@@ -490,6 +531,16 @@ async function checkDesktopUpdates() {
   } finally {
     updateCheckPromise = null
   }
+}
+
+function installDownloadedUpdate() {
+  if (currentUpdateState().status !== 'downloaded' || updateInstallInProgress) return false
+  updateInstallInProgress = true
+  isQuitting = true
+  stopBackgroundProcesses()
+  if (usesSquirrelUpdater) autoUpdater.quitAndInstall()
+  else autoUpdater.quitAndInstall(false, true)
+  return true
 }
 
 function stopBackgroundProcesses() {
@@ -529,12 +580,7 @@ app.whenReady().then(() => {
   ipcMain.handle('hoya:server-url', () => `http://${serverHost}:${serverPort}`)
   ipcMain.handle('hoya:get-app-version', () => app.getVersion())
   ipcMain.handle('hoya:check-for-updates', () => checkDesktopUpdates())
-  ipcMain.handle('hoya:install-update', () => {
-    if (currentUpdateState().status !== 'downloaded') return false
-    isQuitting = true
-    autoUpdater.quitAndInstall(false, true)
-    return true
-  })
+  ipcMain.handle('hoya:install-update', () => installDownloadedUpdate())
   ipcMain.handle('hoya:get-language', () => currentLanguage)
   ipcMain.handle('hoya:set-language', (_event, language) => setLanguage(language))
   ipcMain.handle('hoya:get-saved-api-key', (_event, workspace) => savedApiKey(workspace))
@@ -595,6 +641,8 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  if (backgroundUpdateTimer) clearInterval(backgroundUpdateTimer)
+  backgroundUpdateTimer = null
   stopBackgroundProcesses()
 })
 

@@ -96,7 +96,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "signed-application/Hoya Agent.exe")) { throw "Signed application output has an unexpected layout." }
-          npx --prefix desktop electron-builder --win nsis portable --x64 --prepackaged signed-application --publish never --config.win.signAndEditExecutable=true
+          npx --prefix desktop electron-builder --win nsis portable squirrel --x64 --prepackaged signed-application --publish never --config.win.signAndEditExecutable=true
 
       - name: Upload unsigned release executables
         id: upload-unsigned-release
@@ -106,6 +106,7 @@ jobs:
           path: |
             artifacts/desktop/Hoya-Agent-Setup-${{ env.VERSION }}-x64.exe
             artifacts/desktop/Hoya-Agent-Portable-${{ env.VERSION }}-x64.exe
+            artifacts/desktop/squirrel-windows/Hoya-Agent-${{ env.VERSION }}-win32-x64-Setup.exe
           if-no-files-found: error
 
       - name: Sign release executables
@@ -127,8 +128,9 @@ jobs:
         run: |
           $setup = "signed-release/Hoya-Agent-Setup-$env:VERSION-x64.exe"
           $portable = "signed-release/Hoya-Agent-Portable-$env:VERSION-x64.exe"
+          $squirrelSetup = "signed-release/squirrel-windows/Hoya-Agent-$env:VERSION-win32-x64-Setup.exe"
           node desktop/scripts/rebuild-update-metadata.cjs $setup "signed-release/latest.yml"
-          foreach ($file in @($setup, $portable)) {
+          foreach ($file in @($setup, $portable, $squirrelSetup)) {
             $signature = Get-AuthenticodeSignature $file
             if ($signature.Status -ne "Valid") { throw "$file signature is $($signature.Status): $($signature.StatusMessage)" }
           }
@@ -143,7 +145,10 @@ jobs:
             "signed-release/Hoya-Agent-Setup-$env:VERSION-x64.exe",
             "signed-release/Hoya-Agent-Setup-$env:VERSION-x64.exe.blockmap",
             "signed-release/Hoya-Agent-Portable-$env:VERSION-x64.exe",
-            "signed-release/latest.yml"
+            "signed-release/latest.yml",
+            "signed-release/squirrel-windows/Hoya-Agent-$env:VERSION-win32-x64-Setup.exe",
+            "artifacts/desktop/squirrel-windows/HoyaAgent-$env:VERSION-full.nupkg",
+            "artifacts/desktop/squirrel-windows/RELEASES"
           )
           gh release view $tag *> $null
           if ($LASTEXITCODE -eq 0) {
@@ -151,3 +156,21 @@ jobs:
           } else {
             gh release create $tag $assets --verify-tag --generate-notes --title "Hoya Agent $env:VERSION"
           }
+
+      - name: Verify Electron public update feed
+        shell: pwsh
+        run: |
+          $feed = "https://update.electronjs.org/lihongyao517/Hoya_agent/win32-x64/$env:VERSION/RELEASES"
+          for ($attempt = 1; $attempt -le 20; $attempt++) {
+            try {
+              $response = Invoke-WebRequest -Uri $feed -Headers @{ "User-Agent" = "Hoya-Agent-release-check/$env:VERSION" }
+              if ($response.StatusCode -eq 200 -and $response.Content -match "HoyaAgent-$([regex]::Escape($env:VERSION))-full\.nupkg") {
+                Write-Host "Electron public update feed is ready: $feed"
+                exit 0
+              }
+            } catch {
+              Write-Host "Feed attempt $attempt is not ready: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 15
+          }
+          throw "Electron public update feed did not expose version $env:VERSION within five minutes: $feed"
