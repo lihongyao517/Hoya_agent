@@ -75,7 +75,7 @@ Hoya_agent/
 │   ├── workspace_ops.py         # 工作区操作（diff、审批写入等）
 │   ├── server.py                # 桌面客户端调用的本地 HTTP 后端
 │   └── qq_bridge.py             # QQ 私聊桥接（OneBot 协议）
-├── desktop/                     # Electron + React 桌面客户端
+├── desktop/                     # Electron + Vue 3 + Element Plus 桌面客户端
 ├── local_ai_study_assistant/    # 独立 RAG 学习助手
 │   ├── app.py                   # HTTP 服务入口
 │   └── assistant/               # 文档解析、知识库、检索、LLM 等模块

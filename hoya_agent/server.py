@@ -16,8 +16,15 @@ from .agent import HoyaAgent
 from .config import Config, mask_secret, read_api_config_values, validate_api_config_update, write_dotenv_values
 from .conversations import ConversationStore
 from .memory import MemoryStore
+from .model_discovery import discover_models
 from .user_settings import UserSettingsStore, default_settings_path
 from .workspace_ops import apply_pending_operation, build_index, deny_pending_operation, import_path, load_pending_writes, search_index
+
+
+def public_model_payload(model: dict[str, Any]) -> dict[str, Any]:
+    payload = {key: value for key, value in model.items() if key != "api_key"}
+    payload["api_key_set"] = bool(str(model.get("api_key", "")).strip())
+    return payload
 
 
 class AgentServerState:
@@ -197,6 +204,15 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/projects/select":
                 self.handle_select_project()
                 return
+            if parsed.path == "/api/projects/update":
+                self.handle_update_project()
+                return
+            if parsed.path == "/api/projects/delete":
+                self.handle_delete_project()
+                return
+            if parsed.path == "/api/projects/task":
+                self.handle_create_project_task()
+                return
             if parsed.path == "/api/conversations/rename":
                 self.handle_rename_conversation()
                 return
@@ -214,6 +230,9 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/models":
                 self.handle_save_model()
+                return
+            if parsed.path == "/api/models/discover":
+                self.handle_discover_models()
                 return
             if parsed.path == "/api/models/select":
                 self.handle_select_model()
@@ -328,8 +347,23 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
 
     def handle_projects(self) -> None:
         store = self.user_settings_store()
-        store.remember_project(self.state.workspace)
-        self.write_json({"ok": True, "projects": store.list_projects(), "active_path": str(self.state.workspace)})
+        projects = []
+        for project in store.list_projects(include_archived=True):
+            project_path = Path(str(project.get("path", ""))).expanduser()
+            tasks: list[dict[str, Any]] = []
+            if project_path.is_dir():
+                state_dir = project_path / ".hoya"
+                index_path = state_dir / "conversations.json"
+                messages_dir = state_dir / "conversations"
+                legacy_index = project_path / ".hoya_conversations.json"
+                legacy_messages = project_path / ".hoya_conversations"
+                if not index_path.exists() and legacy_index.exists():
+                    index_path = legacy_index
+                if not messages_dir.exists() and legacy_messages.exists():
+                    messages_dir = legacy_messages
+                tasks = ConversationStore(index_path, messages_dir).list_conversations() if index_path.exists() else []
+            projects.append({**project, "exists": project_path.is_dir(), "tasks": tasks})
+        self.write_json({"ok": True, "projects": projects, "active_path": str(self.state.workspace)})
 
     def handle_create_project(self) -> None:
         payload = self.read_json()
@@ -366,6 +400,42 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
         self.state.reload(project_path)
         project = self.user_settings_store().remember_project(project_path)
         self.write_json({"ok": True, "project": project, "status": self.state.status_payload()})
+
+    def handle_update_project(self) -> None:
+        payload = self.read_json()
+        project_id = str(payload.get("id", "")).strip()
+        if not project_id:
+            self.write_json({"ok": False, "error": "id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        name = str(payload.get("name", "")) if "name" in payload else None
+        archived = bool(payload.get("archived")) if "archived" in payload else None
+        project = self.user_settings_store().update_project(project_id, name=name, archived=archived)
+        self.write_json({"ok": True, "project": project})
+
+    def handle_delete_project(self) -> None:
+        payload = self.read_json()
+        project_id = str(payload.get("id", "")).strip()
+        if not project_id:
+            self.write_json({"ok": False, "error": "id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        self.user_settings_store().remove_project(project_id)
+        self.write_json({"ok": True})
+
+    def handle_create_project_task(self) -> None:
+        payload = self.read_json()
+        project_id = str(payload.get("project_id", "")).strip()
+        title = str(payload.get("title", "")).strip() or "新任务"
+        if not project_id:
+            self.write_json({"ok": False, "error": "project_id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        project = self.user_settings_store().get_project(project_id)
+        project_path = Path(str(project.get("path", ""))).expanduser().resolve()
+        if not project_path.is_dir():
+            self.write_json({"ok": False, "error": "project directory does not exist"}, HTTPStatus.BAD_REQUEST)
+            return
+        state_dir = project_path / ".hoya"
+        task = ConversationStore(state_dir / "conversations.json", state_dir / "conversations").create_conversation(title, kind="task")
+        self.write_json({"ok": True, "task": task, "project": project})
 
     def handle_create_conversation(self) -> None:
         payload = self.read_json()
@@ -432,10 +502,21 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
     def handle_models(self) -> None:
         store = self.user_settings_store()
         data = store.load()
-        self.write_json({"ok": True, "models": store.list_models(), "active_model_id": data.get("active_model_id", "")})
+        self.write_json({"ok": True, "models": [public_model_payload(item) for item in store.list_models()], "active_model_id": data.get("active_model_id", "")})
 
     def handle_save_model(self) -> None:
-        self.write_json({"ok": True, "model": self.user_settings_store().upsert_model(self.read_json())})
+        model = self.user_settings_store().upsert_model(self.read_json())
+        self.write_json({"ok": True, "model": public_model_payload(model)})
+
+    def handle_discover_models(self) -> None:
+        payload = self.read_json()
+        provider = str(payload.get("provider", "openai-compatible")).strip().lower() or "openai-compatible"
+        base_url = str(payload.get("base_url", "")).strip()
+        api_key = str(payload.get("api_key", "")).strip()
+        if not base_url:
+            self.write_json({"ok": False, "error": "base_url is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        self.write_json(discover_models(base_url, api_key, provider))
 
     def handle_select_model(self) -> None:
         payload = self.read_json()
@@ -444,13 +525,14 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             "HOYA_LLM_PROVIDER": str(model.get("provider", "openai-compatible")),
             "HOYA_BASE_URL": str(model.get("base_url", "")),
             "HOYA_MODEL": str(model.get("model", "")),
+            "HOYA_API_KEY": str(model.get("api_key", "")),
             "HOYA_WIRE_API": str(model.get("wire_api", "chat")),
             "HOYA_REASONING_EFFORT": str(model.get("reasoning_effort", "medium")),
             "HOYA_SHOW_REASONING": "1" if model.get("show_reasoning", True) else "0",
         }
         write_dotenv_values(self.state.workspace / ".env", updates)
         self.state.reload()
-        self.write_json({"ok": True, "model": model, "status": self.state.status_payload()})
+        self.write_json({"ok": True, "model": public_model_payload(model), "status": self.state.status_payload()})
 
     def handle_delete_model(self) -> None:
         payload = self.read_json()
@@ -596,16 +678,27 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             conversation_store.append_message(conversation_id, "user", task)
             agent.run_log.append({"type": "task_start", "task": task, "run_id": run_id, "conversation_id": conversation_id, "ui": "desktop"})
             final_text = ""
+            reasoning_items: list[str] = []
+            tool_results: list[dict[str, Any]] = []
             for event in agent.run_stream(task, conversation_id=conversation_id, cancel_event=cancel_event, run_id=run_id):
                 event_type = event.get("type")
                 if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "error", "cancelled", "done"}:
                     agent.run_log.append({"type": "agent_event", "event": event, "run_id": run_id, "conversation_id": conversation_id, "ui": "desktop"})
                 if event_type == "done":
                     final_text = str(event.get("text", ""))
+                elif event_type == "reasoning" and event.get("text"):
+                    reasoning_items.append(str(event["text"]))
+                elif event_type == "tool_result":
+                    tool_results.append({"name": str(event.get("name", "")), "result": str(event.get("result", ""))})
                 self.write_ndjson_event(event)
             if final_text:
                 agent.history.append("assistant", final_text)
-                conversation_store.append_message(conversation_id, "assistant", final_text)
+                conversation_store.append_message(
+                    conversation_id,
+                    "assistant",
+                    final_text,
+                    {"run_id": run_id, "reasoning": reasoning_items, "tool_results": tool_results},
+                )
         except (BrokenPipeError, ConnectionResetError):
             cancel_event.set()
         except Exception as exc:
@@ -642,16 +735,27 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
         try:
             self.write_ndjson_event({"type": "run_started", "run_id": run_id, "resumed": True})
             final_text = ""
+            reasoning_items: list[str] = []
+            tool_results: list[dict[str, Any]] = []
             for event in agent.resume_stream(run_id, cancel_event=cancel_event):
                 event_type = event.get("type")
                 if event_type in {"status", "reasoning", "tool_start", "tool_result", "approval_required", "verification", "error", "cancelled", "done"}:
                     agent.run_log.append({"type": "agent_event", "event": event, "run_id": run_id, "conversation_id": conversation_id, "ui": "desktop"})
                 if event_type == "done":
                     final_text = str(event.get("text", ""))
+                elif event_type == "reasoning" and event.get("text"):
+                    reasoning_items.append(str(event["text"]))
+                elif event_type == "tool_result":
+                    tool_results.append({"name": str(event.get("name", "")), "result": str(event.get("result", ""))})
                 self.write_ndjson_event(event)
             if final_text:
                 agent.history.append("assistant", final_text)
-                conversation_store.append_message(conversation_id, "assistant", final_text)
+                conversation_store.append_message(
+                    conversation_id,
+                    "assistant",
+                    final_text,
+                    {"run_id": run_id, "reasoning": reasoning_items, "tool_results": tool_results},
+                )
         except (BrokenPipeError, ConnectionResetError):
             cancel_event.set()
         except Exception as exc:

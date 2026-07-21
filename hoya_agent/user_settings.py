@@ -45,13 +45,17 @@ class UserSettingsStore:
     def list_models(self) -> list[dict[str, Any]]:
         return [item for item in self.load().get("models", []) if isinstance(item, dict)]
 
-    def list_projects(self) -> list[dict[str, Any]]:
-        projects = [item for item in self.load().get("projects", []) if isinstance(item, dict) and item.get("path")]
+    def list_projects(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        projects = [
+            {**item, "archived": bool(item.get("archived", False))}
+            for item in self.load().get("projects", [])
+            if isinstance(item, dict) and item.get("path") and (include_archived or not item.get("archived", False))
+        ]
         return sorted(projects, key=lambda item: item.get("updated_at", ""), reverse=True)
 
     def remember_project(self, project_path: Path, name: str | None = None) -> dict[str, Any]:
         data = self.load()
-        projects = self.list_projects()
+        projects = self.list_projects(include_archived=True)
         resolved = project_path.expanduser().resolve()
         now = datetime.now().isoformat(timespec="seconds")
         normalized_path = os.path.normcase(str(resolved))
@@ -60,6 +64,7 @@ class UserSettingsStore:
             if os.path.normcase(str(project.get("path", ""))) == normalized_path:
                 project["name"] = (name or str(project.get("name", "")) or resolved.name or str(resolved)).strip()
                 project["path"] = str(resolved)
+                project["archived"] = False
                 project["updated_at"] = now
                 selected = project
                 break
@@ -70,12 +75,52 @@ class UserSettingsStore:
                 "path": str(resolved),
                 "created_at": now,
                 "updated_at": now,
+                "archived": False,
             }
             projects.append(selected)
         data["projects"] = projects
         data["last_workspace"] = str(resolved)
         self.save(data)
         return selected
+
+    def update_project(
+        self,
+        project_id: str,
+        *,
+        name: str | None = None,
+        archived: bool | None = None,
+    ) -> dict[str, Any]:
+        data = self.load()
+        projects = self.list_projects(include_archived=True)
+        for project in projects:
+            if str(project.get("id", "")) != project_id:
+                continue
+            if name is not None:
+                project["name"] = name.strip()[:120] or project.get("name") or Path(str(project["path"])).name
+            if archived is not None:
+                project["archived"] = archived
+            project["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            data["projects"] = projects
+            self.save(data)
+            return project
+        raise KeyError(f"project not found: {project_id}")
+
+    def remove_project(self, project_id: str) -> None:
+        data = self.load()
+        projects = self.list_projects(include_archived=True)
+        removed = next((item for item in projects if str(item.get("id", "")) == project_id), None)
+        if removed is None:
+            raise KeyError(f"project not found: {project_id}")
+        data["projects"] = [item for item in projects if str(item.get("id", "")) != project_id]
+        if os.path.normcase(str(data.get("last_workspace", ""))) == os.path.normcase(str(removed.get("path", ""))):
+            data["last_workspace"] = ""
+        self.save(data)
+
+    def get_project(self, project_id: str) -> dict[str, Any]:
+        for project in self.list_projects(include_archived=True):
+            if str(project.get("id", "")) == project_id:
+                return project
+        raise KeyError(f"project not found: {project_id}")
 
     def upsert_model(self, model: dict[str, Any]) -> dict[str, Any]:
         data = self.load()
@@ -87,6 +132,7 @@ class UserSettingsStore:
             "provider": normalize_provider(str(model.get("provider") or "openai-compatible")),
             "base_url": str(model.get("base_url") or ""),
             "model": str(model.get("model") or ""),
+            "api_key": str(model.get("api_key") or ""),
             "wire_api": str(model.get("wire_api") or "chat"),
             "reasoning_effort": normalize_reasoning_effort(str(model.get("reasoning_effort") or "medium")),
             "show_reasoning": bool(model.get("show_reasoning", True)),

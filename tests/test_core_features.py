@@ -3,15 +3,18 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import urllib.error
+from unittest.mock import patch
 from pathlib import Path
 
 from hoya_agent.agent import HoyaAgent
 from hoya_agent.config import ANTHROPIC_DEFAULT_BASE_URL, Config, validate_api_config_update
 from hoya_agent.conversations import ConversationStore
-from hoya_agent.llm import LLMClient
+from hoya_agent.llm import LLMClient, connection_error_message, urlopen_with_ollama_retry
 from hoya_agent.memory import MemoryStore
+from hoya_agent.model_discovery import discover_models
 from hoya_agent.run_state import ChangeStore, RunStore
-from hoya_agent.server import AgentServerState
+from hoya_agent.server import AgentServerState, public_model_payload
 from hoya_agent.user_settings import UserSettingsStore
 from hoya_agent.workspace_ops import apply_pending_operation, build_index, search_index
 
@@ -49,6 +52,23 @@ class ConversationStoreTests(unittest.TestCase):
             self.assertEqual(loaded["kind"], "task")
             self.assertEqual(loaded["status"], "open")
 
+    def test_message_metadata_is_persisted_for_reasoning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ConversationStore(root / "conversations.json", root / "messages")
+            conversation = store.create_conversation("Task")
+
+            store.append_message(
+                conversation["id"],
+                "assistant",
+                "完成",
+                {"reasoning": ["检查上下文", "验证结果"], "tool_results": [{"name": "read_file", "result": "ok"}]},
+            )
+
+            loaded = store.messages(conversation["id"])[0]
+            self.assertEqual(loaded["meta"]["reasoning"], ["检查上下文", "验证结果"])
+            self.assertEqual(loaded["meta"]["tool_results"][0]["name"], "read_file")
+
 
 class ProjectSettingsTests(unittest.TestCase):
     def test_projects_are_remembered_and_reselected(self) -> None:
@@ -64,6 +84,46 @@ class ProjectSettingsTests(unittest.TestCase):
             self.assertEqual(first["id"], second["id"])
             self.assertEqual(settings.load()["last_workspace"], str(project.resolve()))
             self.assertEqual(settings.list_projects()[0]["name"], "Renamed")
+
+    def test_projects_can_be_archived_renamed_and_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = UserSettingsStore(root / "settings.json")
+            project_path = root / "demo"
+            project_path.mkdir()
+            project = settings.remember_project(project_path, "Demo")
+
+            updated = settings.update_project(project["id"], name="Client", archived=True)
+
+            self.assertEqual(updated["name"], "Client")
+            self.assertTrue(updated["archived"])
+            self.assertEqual(settings.list_projects(), [])
+            self.assertEqual(settings.list_projects(include_archived=True)[0]["id"], project["id"])
+
+            settings.remove_project(project["id"])
+            self.assertEqual(settings.list_projects(include_archived=True), [])
+
+    def test_model_presets_keep_api_key_for_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            store = UserSettingsStore(path)
+            saved = store.upsert_model(
+                {
+                    "name": "Relay",
+                    "provider": "openai-compatible",
+                    "base_url": "https://relay.example.com/v1",
+                    "model": "gpt-test",
+                    "api_key": "sk-test-key",
+                }
+            )
+
+            reloaded = UserSettingsStore(path)
+
+            self.assertEqual(saved["api_key"], "sk-test-key")
+            self.assertEqual(reloaded.list_models()[0]["api_key"], "sk-test-key")
+            public = public_model_payload(saved)
+            self.assertNotIn("api_key", public)
+            self.assertTrue(public["api_key_set"])
 
 
 class ApiConfigurationTests(unittest.TestCase):
@@ -179,6 +239,50 @@ class LLMClientTests(unittest.TestCase):
             json.loads(arguments["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]),
             {"path": "README.md"},
         )
+
+    def test_ollama_connection_is_retried_after_startup(self) -> None:
+        request = object()
+        response = object()
+        refused = urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+        with patch("hoya_agent.llm.urllib.request.urlopen", side_effect=[refused, response]) as urlopen:
+            with patch("hoya_agent.llm.ensure_ollama_service", return_value=True):
+                result = urlopen_with_ollama_retry(
+                    request,
+                    base_url="http://127.0.0.1:11434/v1",
+                    provider="ollama",
+                    timeout=5,
+                )
+
+        self.assertIs(result, response)
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_ollama_connection_error_is_actionable(self) -> None:
+        message = connection_error_message("ollama", "http://127.0.0.1:11434/v1", "refused")
+
+        self.assertIn("自动启动", message)
+        self.assertIn("11434", message)
+
+
+class ModelDiscoveryTests(unittest.TestCase):
+    def test_openai_compatible_models_are_normalized(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return json.dumps({"data": [{"id": "gpt-a"}, {"id": "gpt-a"}, {"id": "gpt-b"}]}).encode()
+
+        with patch("hoya_agent.model_discovery.urllib.request.urlopen", return_value=FakeResponse()) as request:
+            result = discover_models("https://relay.example.com/v1/chat/completions", "sk-test")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([item["id"] for item in result["models"]], ["gpt-a", "gpt-b"])
+        self.assertEqual(result["endpoint"], "https://relay.example.com/v1/models")
+        headers = request.call_args.args[0].headers
+        self.assertEqual(headers["Authorization"], "Bearer sk-test")
 
 
 class RunCancellationTests(unittest.TestCase):

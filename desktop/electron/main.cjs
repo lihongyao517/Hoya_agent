@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, Menu, Tray } = require('electron')
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Tray, shell } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn } = require('node:child_process')
@@ -14,6 +14,8 @@ let mainWindow = null
 let tray = null
 let isQuitting = false
 let backgroundNoticeShown = false
+const terminalRuns = new Map()
+const approvedWorkspacePaths = new Set()
 
 function applyDwmCornerPreference(win) {
   if (process.platform !== 'win32' || win.isDestroyed()) return
@@ -68,11 +70,145 @@ function readJsonFile(filePath) {
   }
 }
 
+function savedApiKey(workspace) {
+  const resolved = path.resolve(String(workspace || ''))
+  const settings = readJsonFile(pythonSettingsPath())
+  const projectPaths = Array.isArray(settings.projects) ? settings.projects.map((item) => item?.path).filter(Boolean) : []
+  const allowed = [initialWorkspace(), settings.last_workspace, ...projectPaths]
+    .filter(Boolean)
+    .some((item) => path.resolve(String(item)).toLowerCase() === resolved.toLowerCase())
+  if (!allowed) return ''
+  try {
+    const lines = fs.readFileSync(path.join(resolved, '.env'), 'utf8').split(/\r?\n/)
+    const line = lines.find((item) => /^\s*(?:export\s+)?HOYA_API_KEY\s*=/.test(item))
+    if (!line) return ''
+    return line.slice(line.indexOf('=') + 1).trim().replace(/^['"]|['"]$/g, '')
+  } catch {
+    return ''
+  }
+}
+
 function initialWorkspace() {
   if (process.env.HOYA_WORKSPACE) return process.env.HOYA_WORKSPACE
   const settings = readJsonFile(pythonSettingsPath())
   if (settings.last_workspace) return settings.last_workspace
   return isDev ? projectRoot() : app.getPath('home')
+}
+
+function rememberWorkspace(workspace) {
+  if (!workspace) return
+  approvedWorkspacePaths.add(path.resolve(String(workspace)).toLowerCase())
+}
+
+function knownWorkspaceRoots() {
+  const settings = readJsonFile(pythonSettingsPath())
+  const paths = [initialWorkspace(), settings.last_workspace, ...(Array.isArray(settings.projects) ? settings.projects.map((item) => item?.path) : [])]
+  for (const workspace of paths) rememberWorkspace(workspace)
+  return [...approvedWorkspacePaths]
+}
+
+function terminalWorkingDirectory(value) {
+  const resolved = path.resolve(String(value || ''))
+  const normalized = resolved.toLowerCase()
+  const allowed = knownWorkspaceRoots().some((root) => normalized === root || normalized.startsWith(`${root}${path.sep}`))
+  if (!allowed || !fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error('Terminal directory is outside the approved workspaces.')
+  }
+  return resolved
+}
+
+function startTerminalCommand(event, payload) {
+  const command = String(payload?.command || '').trim()
+  if (!command) throw new Error('Command is required.')
+  if (command.length > 16000) throw new Error('Command is too long.')
+
+  const cwd = terminalWorkingDirectory(payload?.cwd)
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const encodedCommand = `$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ${command}`
+  const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', encodedCommand], {
+    cwd,
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const sender = event.sender
+  terminalRuns.set(id, { child, senderId: sender.id })
+  const emit = (stream, data) => {
+    if (!sender.isDestroyed()) sender.send('hoya:terminal-output', { id, stream, data: String(data) })
+  }
+  child.stdout.on('data', (data) => emit('stdout', data))
+  child.stderr.on('data', (data) => emit('stderr', data))
+  child.on('error', (error) => emit('error', error.message))
+  child.on('close', (code) => {
+    terminalRuns.delete(id)
+    if (!sender.isDestroyed()) sender.send('hoya:terminal-output', { id, stream: 'exit', data: '', code: code ?? -1 })
+  })
+  return { ok: true, id, cwd }
+}
+
+function stopTerminalCommand(event, id) {
+  const run = terminalRuns.get(String(id || ''))
+  if (!run || run.senderId !== event.sender.id) return false
+  if (process.platform === 'win32' && run.child.pid) {
+    spawn('taskkill.exe', ['/PID', String(run.child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+  } else {
+    run.child.kill()
+  }
+  return true
+}
+
+function runCodeSnippet(_event, payload) {
+  const code = String(payload?.code || '')
+  const language = String(payload?.language || '').trim().toLowerCase()
+  if (!code.trim()) throw new Error('Code is required.')
+  if (code.length > 20000) throw new Error('Code block is too long to run.')
+  const cwd = terminalWorkingDirectory(payload?.cwd)
+  let command = ''
+  let args = []
+  if (['python', 'py'].includes(language)) {
+    command = process.env.HOYA_PYTHON || 'python'
+    args = ['-c', code]
+  } else if (['javascript', 'js', 'node'].includes(language)) {
+    command = 'node'
+    args = ['-e', code]
+  } else if (['powershell', 'ps1'].includes(language)) {
+    command = 'powershell.exe'
+    args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(code, 'utf16le').toString('base64')]
+  } else {
+    throw new Error(`Unsupported runnable language: ${language || 'unknown'}`)
+  }
+
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    const child = spawn(command, args, {
+      cwd,
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    let timedOut = false
+    const append = (current, chunk) => `${current}${String(chunk)}`.slice(-200000)
+    child.stdout.on('data', (chunk) => { stdout = append(stdout, chunk) })
+    child.stderr.on('data', (chunk) => { stderr = append(stderr, chunk) })
+    child.on('error', (error) => { stderr = append(stderr, error.message) })
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, 30000)
+    child.on('close', (codeValue) => {
+      clearTimeout(timer)
+      resolve({
+        ok: !timedOut && codeValue === 0,
+        stdout,
+        stderr,
+        exitCode: codeValue ?? -1,
+        timedOut,
+        durationMs: Date.now() - startedAt,
+      })
+    })
+  })
 }
 
 function resolveBackendCommand() {
@@ -155,7 +291,7 @@ function rebuildTrayMenu() {
 function createTray() {
   if (tray) return
   tray = new Tray(path.join(__dirname, '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'))
-  tray.setToolTip('Hoya Agent')
+  tray.setToolTip(`Hoya Agent v${app.getVersion()}`)
   tray.on('double-click', showMainWindow)
   rebuildTrayMenu()
 }
@@ -167,7 +303,7 @@ function createWindow() {
     minWidth: 980,
     minHeight: 640,
     frame: false,
-    thickFrame: false,
+    thickFrame: true,
     show: false,
     title: 'Hoya Agent',
     icon: path.join(__dirname, '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
@@ -176,10 +312,35 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
     },
   })
   mainWindow = win
   windows.add(win)
+  win.webContents.on('will-attach-webview', (event, webPreferences, params) => {
+    delete webPreferences.preload
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+    webPreferences.sandbox = true
+    const source = String(params.src || 'about:blank')
+    if (source === 'about:blank' || /^https?:\/\//i.test(source)) return
+    if (source.startsWith('file://')) {
+      try {
+        const localPath = decodeURIComponent(new URL(source).pathname).replace(/^\/(?:([A-Za-z]:))/, '$1')
+        terminalWorkingDirectory(path.dirname(localPath))
+        return
+      } catch {
+        // Fall through and reject unapproved local files.
+      }
+    }
+    event.preventDefault()
+  })
+  win.webContents.on('did-attach-webview', (_event, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(url)) shell.openExternal(url)
+      return { action: 'deny' }
+    })
+  })
   win.on('close', (event) => {
     if (isQuitting) return
     event.preventDefault()
@@ -241,13 +402,33 @@ function startBackend() {
 }
 
 app.whenReady().then(() => {
+  rememberWorkspace(initialWorkspace())
   loadLanguage()
   Menu.setApplicationMenu(null)
   startBackend()
   createTray()
   ipcMain.handle('hoya:server-url', () => `http://${serverHost}:${serverPort}`)
+  ipcMain.handle('hoya:get-app-version', () => app.getVersion())
   ipcMain.handle('hoya:get-language', () => currentLanguage)
   ipcMain.handle('hoya:set-language', (_event, language) => setLanguage(language))
+  ipcMain.handle('hoya:get-saved-api-key', (_event, workspace) => savedApiKey(workspace))
+  ipcMain.handle('hoya:terminal-run', (event, payload) => startTerminalCommand(event, payload))
+  ipcMain.handle('hoya:terminal-stop', (event, id) => stopTerminalCommand(event, id))
+  ipcMain.handle('hoya:run-code', (event, payload) => runCodeSnippet(event, payload))
+  ipcMain.handle('hoya:clipboard-write', (_event, text) => {
+    clipboard.writeText(String(text || '').slice(0, 1000000))
+    return true
+  })
+  ipcMain.handle('hoya:open-path', async (_event, value) => {
+    const resolved = terminalWorkingDirectory(value)
+    return (await shell.openPath(resolved)) === ''
+  })
+  ipcMain.handle('hoya:open-external', (_event, url) => {
+    const target = String(url || '')
+    if (!/^https?:\/\//i.test(target)) return false
+    shell.openExternal(target)
+    return true
+  })
   ipcMain.handle('hoya:window-minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize())
   ipcMain.handle('hoya:window-toggle-maximize', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -261,6 +442,7 @@ app.whenReady().then(() => {
   ipcMain.handle('hoya:select-directory', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
     if (result.canceled || result.filePaths.length === 0) return null
+    rememberWorkspace(result.filePaths[0])
     return result.filePaths[0]
   })
   ipcMain.handle('hoya:select-file', async () => {
@@ -285,6 +467,8 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
+  for (const { child } of terminalRuns.values()) child.kill()
+  terminalRuns.clear()
   if (backend) {
     backend.kill()
     backend = null

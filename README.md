@@ -2,7 +2,7 @@
 
 一个本地 AI Agent MVP，目标是高效率、高精确度地完成你给出的本地工作区任务。
 
-它支持 OpenAI-compatible 的 Chat Completions / Responses 中转站、Anthropic 官方或兼容 Messages API 的中转站，也支持通过 Ollama 使用本地部署模型。远程模式配置 `HOYA_BASE_URL`、`HOYA_API_KEY` 和 `HOYA_MODEL`；Ollama 模式配置本地 `http://127.0.0.1:11434/v1` endpoint 和已安装模型名即可。项目提供命令行 CLI、Textual TUI、Electron + React 桌面端和本地 HTTP 后端服务，支持读取文件、搜索、写入、建立索引、记录历史、可选执行 PowerShell 命令等能力。
+它支持 OpenAI-compatible 的 Chat Completions / Responses 中转站、Anthropic 官方或兼容 Messages API 的中转站，也支持通过 Ollama 使用本地部署模型。远程模式配置 `HOYA_BASE_URL`、`HOYA_API_KEY` 和 `HOYA_MODEL`；Ollama 模式配置本地 `http://127.0.0.1:11434/v1` endpoint 和已安装模型名即可。项目提供命令行 CLI、Textual TUI、Electron + Vue 3 + Element Plus 桌面端和本地 HTTP 后端服务，支持读取文件、搜索、写入、建立索引、记录历史、可选执行 PowerShell 命令等能力。
 
 ## 产品定位与适用边界
 
@@ -22,7 +22,7 @@ Hoya Agent 当前更适合作为“本地工作区任务助手”MVP：让模型
 | --- | --- | --- |
 | 共享 Agent 核心 | `hoya_agent/` | 模型适配、工具调用、会话、工作区安全、HTTP 后端和配置 |
 | 终端部分 | `hoya_agent/terminal/` | 轻量 CLI 与 Textual TUI，只负责终端交互和事件展示 |
-| 桌面客户端 | `desktop/` | Electron 主进程、React 界面、工作区与会话管理 |
+| 桌面客户端 | `desktop/` | Electron 主进程、Vue + Element Plus 界面、工作区与会话管理 |
 
 终端和桌面客户端复用同一个 `HoyaAgent`、配置文件与 `.hoya/` 工作区状态，不各自复制业务逻辑。
 
@@ -59,7 +59,7 @@ Hoya Agent 当前更适合作为“本地工作区任务助手”MVP：让模型
 | --- | --- |
 | 语言 | Python |
 | TUI | Textual |
-| 桌面端 | Electron + React + Vite |
+| 桌面端 | Electron + Vue 3 + Element Plus + Vite |
 | 文档解析 | pypdf，以及项目内置的 docx/xlsx/pdf 读取逻辑 |
 | 模型接口 | OpenAI-compatible Chat Completions / Responses；Anthropic Messages；Ollama 本地 OpenAI-compatible endpoint |
 | 数据存储 | 本地 JSON / JSONL 历史、记忆、索引和待审批写入 |
@@ -170,7 +170,7 @@ TUI 本地命令：
 
 ## 桌面客户端部分
 
-桌面客户端源码位于 `desktop/`：`desktop/src/` 是 React 界面，`desktop/electron/` 是 Electron 主进程与 preload。客户端通过本地 HTTP 服务复用 Python Agent 核心。
+桌面客户端源码位于 `desktop/`：`desktop/src/` 是 Vue 3 + Element Plus 界面，`desktop/electron/` 是 Electron 主进程与 preload。客户端通过本地 HTTP 服务复用 Python Agent 核心。
 
 ### 开发模式
 
@@ -180,7 +180,7 @@ npm install
 npm run dev
 ```
 
-Electron 主进程会自动启动 `python -m hoya_agent --server`，React 前端通过 `http://127.0.0.1:8787` 调用 Agent。
+Electron 主进程会自动启动 `python -m hoya_agent --server`，Vue 前端通过 `http://127.0.0.1:8787` 调用 Agent。
 
 ### 构建 Windows 客户端
 
@@ -196,7 +196,9 @@ npm run dist:full
 
 - 原生窗口化聊天与流式响应，可停止当前运行。
 - 对话重命名、颜色标记、删除及工作区切换。
-- OpenAI-compatible、Anthropic Messages 和 Ollama 配置。
+- OpenAI-compatible、Anthropic Messages 和 Ollama 配置，已保存 API Key 会在重启后回填。
+- 输入 API Key 与 URL 后调用 `/models` 一键发现模型，并可保存带凭据的模型预设。
+- 在聊天输入区直接切换模型和推理强度，选择会同步到当前工作区配置。
 - 工具活动、参数预览、索引搜索、历史与待审批写入管理。
 - Enter 发送、Shift+Enter 换行。
 
@@ -512,7 +514,7 @@ Hoya_agent/
 │   └── ...                     # 工具、模型客户端、会话、索引等共享模块
 ├── desktop/
 │   ├── electron/               # Electron 主进程和 preload
-│   └── src/                    # React 桌面客户端
+│   └── src/                    # Vue 3 + Element Plus 桌面客户端
 ├── tests/                      # Python 核心自动化测试
 ├── docs/                       # 项目说明和补充文档
 ├── local_ai_study_assistant/   # 独立 RAG 学习助手

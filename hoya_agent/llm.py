@@ -2,11 +2,99 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import shutil
+import socket
+import subprocess
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlsplit
+
+
+def _ollama_address(base_url: str) -> tuple[str, int] | None:
+    parsed = urlsplit(base_url)
+    host = (parsed.hostname or "").lower()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    return host, parsed.port or 11434
+
+
+def _port_is_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def _ollama_executable() -> str:
+    executable = shutil.which("ollama")
+    if executable:
+        return executable
+    if os.name == "nt":
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        candidate = Path(local_appdata) / "Programs" / "Ollama" / "ollama.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
+def ensure_ollama_service(base_url: str, wait_seconds: float = 8.0) -> bool:
+    address = _ollama_address(base_url)
+    if address is None:
+        return False
+    host, port = address
+    if _port_is_open(host, port):
+        return True
+    executable = _ollama_executable()
+    if not executable:
+        return False
+    try:
+        subprocess.Popen(
+            [executable, "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
+        return False
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if _port_is_open(host, port):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def urlopen_with_ollama_retry(
+    request: urllib.request.Request,
+    *,
+    base_url: str,
+    provider: str,
+    timeout: int,
+) -> Any:
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.URLError:
+        if provider == "ollama" and ensure_ollama_service(base_url):
+            return urllib.request.urlopen(request, timeout=timeout)
+        raise
+
+
+def connection_error_message(provider: str, base_url: str, reason: Any) -> str:
+    if provider == "ollama":
+        return (
+            "本地 Ollama 服务无法连接。Hoya 已尝试自动启动 Ollama，但服务仍不可用。\n"
+            f"地址：{base_url}\n"
+            "请确认 Ollama 已安装、模型已下载，并检查 11434 端口是否被防火墙或其他程序占用。"
+        )
+    return f"LLM request failed: {reason}"
 
 
 @dataclass
@@ -247,7 +335,7 @@ class LLMClient:
         )
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urlopen_with_ollama_retry(request, base_url=self.base_url, provider=self.provider, timeout=self.timeout) as response:
                 body = response.read().decode("utf-8", errors="replace")
                 if not body.strip():
                     raise RuntimeError(
@@ -275,7 +363,7 @@ class LLMClient:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"LLM request failed: HTTP {exc.code}\n{body}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+            raise RuntimeError(connection_error_message(self.provider, self.base_url, exc.reason)) from exc
 
     def chat_stream(
         self,
@@ -289,7 +377,7 @@ class LLMClient:
         request = self._request(payload)
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urlopen_with_ollama_retry(request, base_url=self.base_url, provider=self.provider, timeout=self.timeout) as response:
                 stream_finished = threading.Event()
                 if cancel_event is not None:
                     threading.Thread(
@@ -359,7 +447,7 @@ class LLMClient:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"LLM request failed: HTTP {exc.code}\n{body}") from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM request failed: {exc.reason}") from exc
+            raise RuntimeError(connection_error_message(self.provider, self.base_url, exc.reason)) from exc
         except (OSError, ValueError, http.client.IncompleteRead) as exc:
             if cancel_event is not None and cancel_event.is_set():
                 return

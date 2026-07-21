@@ -2,8 +2,21 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('hoya', {
   serverUrl: () => ipcRenderer.invoke('hoya:server-url'),
+  getAppVersion: () => ipcRenderer.invoke('hoya:get-app-version'),
   getLanguage: () => ipcRenderer.invoke('hoya:get-language'),
   setLanguage: (language) => ipcRenderer.invoke('hoya:set-language', language),
+  getSavedApiKey: (workspace) => ipcRenderer.invoke('hoya:get-saved-api-key', workspace),
+  terminalRun: (payload) => ipcRenderer.invoke('hoya:terminal-run', payload),
+  terminalStop: (id) => ipcRenderer.invoke('hoya:terminal-stop', id),
+  runCode: (payload) => ipcRenderer.invoke('hoya:run-code', payload),
+  copyText: (text) => ipcRenderer.invoke('hoya:clipboard-write', text),
+  openPath: (path) => ipcRenderer.invoke('hoya:open-path', path),
+  onTerminalOutput: (callback) => {
+    const listener = (_event, payload) => callback(payload)
+    ipcRenderer.on('hoya:terminal-output', listener)
+    return () => ipcRenderer.removeListener('hoya:terminal-output', listener)
+  },
+  openExternal: (url) => ipcRenderer.invoke('hoya:open-external', url),
   onLanguageChanged: (callback) => {
     const listener = (_event, language) => callback(language)
     ipcRenderer.on('hoya:language-changed', listener)
