@@ -2,6 +2,8 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ArrowLeft, ArrowRight, Link, Refresh, TopRight } from '@element-plus/icons-vue'
 
+defineProps<{ compact?: boolean }>()
+
 const address = ref('http://127.0.0.1:3000')
 const activeUrl = ref('about:blank')
 const loading = ref(false)
@@ -65,7 +67,7 @@ onMounted(() => nextTick(() => addressInput.value?.focus()))
 </script>
 
 <template>
-  <section class="browser-panel">
+  <section class="browser-panel" :class="{ compact }">
     <header class="browser-toolbar">
       <div class="browser-navigation">
         <el-button text :icon="ArrowLeft" aria-label="后退" title="后退" @click="goBack" />
@@ -117,4 +119,24 @@ webview { display: flex; width: 100%; height: 100%; }
 .browser-empty svg { width: 28px; color: #0f766e; }
 .browser-empty strong { color: #e5e7e9; font-size: 14px; }
 .browser-empty span { font-size: 11px; }
+.browser-panel.compact { grid-template-rows: auto 28px minmax(0, 1fr); }
+.compact .browser-toolbar { display: grid; grid-template-columns: auto minmax(90px, 1fr) 36px; grid-template-rows: 36px 34px; gap: 6px; padding: 7px 8px; }
+.compact .browser-navigation { grid-row: 1; grid-column: 1; }
+.compact .address-input { grid-row: 1; grid-column: 2; min-width: 0; }
+.compact .browser-toolbar > :deep(.el-radio-group) { grid-row: 2; grid-column: 1 / -1; justify-self: start; }
+.compact .browser-toolbar > :deep(.el-button:last-child) { grid-row: 1; grid-column: 3; }
+.compact .browser-navigation :deep(.el-button) { width: 32px; min-width: 32px; padding-inline: 6px; }
+.compact .browser-meta { padding-inline: 10px; }
+.compact .preview-stage { padding: 8px; }
+.compact .preview-frame { min-height: 220px; }
+:global(html[data-theme='light']) .browser-panel { color: #292b2f; background: #f4f4f5; }
+:global(html[data-theme='light']) .browser-toolbar { border-color: #d5d6da; background: #f1f1f2; }
+:global(html[data-theme='light']) .address-input :deep(.el-input__wrapper) { color: #292b2f; background: #ffffff; box-shadow: 0 0 0 1px #d5d6da inset; }
+:global(html[data-theme='light']) .browser-meta { color: #74777d; background: #ececee; }
+:global(html[data-theme='light']) .browser-meta strong { color: #3f4247; }
+:global(html[data-theme='light']) .preview-stage { background: #f4f4f5; }
+:global(html[data-theme='light']) .preview-frame { border-color: #cfd0d4; box-shadow: 0 10px 26px rgba(32, 34, 37, .12); }
+:global(html[data-theme='light']) .browser-empty { color: #74777d; background: #ffffff; }
+:global(html[data-theme='light']) .browser-empty strong { color: #292b2f; }
+:global(html[data-theme='light']) .browser-empty svg { color: #666970; }
 </style>
