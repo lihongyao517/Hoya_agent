@@ -2,10 +2,15 @@
 
 declare global {
   type HoyaLanguage = 'zh-CN' | 'en-US'
+  type HoyaUpdateStatus = 'idle' | 'checking' | 'downloading' | 'downloaded' | 'not-available' | 'manual' | 'error'
+  type HoyaUpdateInfo = { ok: boolean; status: HoyaUpdateStatus; currentVersion: string; latestVersion: string; updateAvailable: boolean; autoUpdateSupported: boolean; progress: number; repositoryUrl?: string; tagsUrl?: string; releasesUrl: string; error?: string }
 
   interface HoyaBridge {
     serverUrl(): Promise<string>
     getAppVersion(): Promise<string>
+    checkForUpdates(): Promise<HoyaUpdateInfo>
+    installUpdate(): Promise<boolean>
+    onUpdateStatus(callback: (status: HoyaUpdateInfo) => void): () => void
     getLanguage(): Promise<HoyaLanguage>
     setLanguage(language: HoyaLanguage): Promise<HoyaLanguage>
     getSavedApiKey(workspace: string): Promise<string>

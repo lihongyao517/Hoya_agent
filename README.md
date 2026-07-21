@@ -192,6 +192,18 @@ npm run dist:full
 
 `npm run dist:full` 会先构建 Python 后端，再通过 electron-builder 生成 Windows 安装包和 portable 程序。产物统一写入 `artifacts/desktop/`，安装包和便携版分别使用 `Hoya-Agent-Setup-*` 与 `Hoya-Agent-Portable-*` 文件名。
 
+Windows 无感更新使用 `electron-updater` 和 NSIS 安装版。客户端启动后会在后台检查 GitHub Release；发现新版本后静默下载，下载完成后可立即重启安装，也会在用户正常退出时自动安装。portable 程序只作为免安装备用版本，不支持 Electron 自动更新。
+
+发布新版本时需要先设置具备仓库 Release 权限的 `GH_TOKEN`，再执行：
+
+```powershell
+cd desktop
+$env:GH_TOKEN='你的 GitHub Token'
+npm run release:github
+```
+
+发布命令会把 NSIS 安装包、blockmap 和 `latest.yml` 一起上传到 GitHub Release。三者必须来自同一次构建，否则客户端无法验证或下载更新。
+
 桌面客户端支持：
 
 - 原生窗口化聊天与流式响应，可停止当前运行。

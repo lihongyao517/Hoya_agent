@@ -2,8 +2,11 @@ const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Tray, shell } = re
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn } = require('node:child_process')
+const { autoUpdater } = require('electron-updater')
+const { RELEASES_URL, checkForUpdates: checkTagsForUpdates } = require('./update-service.cjs')
 
 const isDev = !app.isPackaged
+if (process.platform === 'win32') app.setAppUserModelId('com.hoya.agent.desktop')
 const serverHost = '127.0.0.1'
 const serverPort = process.env.HOYA_SERVER_PORT || '8787'
 const supportedLanguages = new Set(['zh-CN', 'en-US'])
@@ -14,6 +17,8 @@ let mainWindow = null
 let tray = null
 let isQuitting = false
 let backgroundNoticeShown = false
+let updateCheckPromise = null
+let updateState = null
 const terminalRuns = new Map()
 const approvedWorkspacePaths = new Set()
 
@@ -383,6 +388,119 @@ function createWindow() {
   }
 }
 
+function currentUpdateState() {
+  return updateState || {
+    ok: true,
+    status: 'idle',
+    currentVersion: app.getVersion(),
+    latestVersion: '',
+    updateAvailable: false,
+    autoUpdateSupported: app.isPackaged,
+    progress: 0,
+    releasesUrl: RELEASES_URL,
+  }
+}
+
+function publishUpdateState(patch) {
+  updateState = { ...currentUpdateState(), ...patch }
+  for (const win of windows) {
+    if (!win.isDestroyed()) win.webContents.send('hoya:update-status', updateState)
+  }
+  return updateState
+}
+
+function configureAutoUpdater() {
+  if (!app.isPackaged) return
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.autoRunAppAfterInstall = true
+  autoUpdater.allowPrerelease = false
+
+  autoUpdater.on('checking-for-update', () => publishUpdateState({ ok: true, status: 'checking', error: undefined }))
+  autoUpdater.on('update-available', (info) => publishUpdateState({
+    ok: true,
+    status: 'downloading',
+    latestVersion: info.version,
+    updateAvailable: true,
+    autoUpdateSupported: true,
+    progress: 0,
+    error: undefined,
+  }))
+  autoUpdater.on('download-progress', (progress) => publishUpdateState({
+    status: 'downloading',
+    progress: Math.max(0, Math.min(100, Math.round(progress.percent || 0))),
+  }))
+  autoUpdater.on('update-downloaded', (info) => publishUpdateState({
+    ok: true,
+    status: 'downloaded',
+    latestVersion: info.version,
+    updateAvailable: true,
+    autoUpdateSupported: true,
+    progress: 100,
+    error: undefined,
+  }))
+  autoUpdater.on('update-not-available', (info) => publishUpdateState({
+    ok: true,
+    status: 'not-available',
+    latestVersion: info.version || app.getVersion(),
+    updateAvailable: false,
+    autoUpdateSupported: true,
+    progress: 0,
+    error: undefined,
+  }))
+  autoUpdater.on('error', (error) => {
+    console.warn(`[hoya-desktop] automatic update failed: ${error}`)
+    publishUpdateState({ ok: false, status: 'error', error: error instanceof Error ? error.message : String(error) })
+  })
+}
+
+async function checkDesktopUpdates() {
+  if (['checking', 'downloading', 'downloaded'].includes(currentUpdateState().status)) return currentUpdateState()
+  if (updateCheckPromise) return updateCheckPromise
+  updateCheckPromise = (async () => {
+    if (!app.isPackaged) {
+      return publishUpdateState({ ok: true, status: 'not-available', latestVersion: app.getVersion(), updateAvailable: false, autoUpdateSupported: false })
+    }
+    try {
+      await autoUpdater.checkForUpdates()
+      return currentUpdateState()
+    } catch (automaticError) {
+      try {
+        const fallback = await checkTagsForUpdates(app.getVersion())
+        return publishUpdateState({
+          ...fallback,
+          status: fallback.updateAvailable ? 'manual' : 'not-available',
+          autoUpdateSupported: false,
+          progress: 0,
+          error: fallback.updateAvailable ? '此版本缺少自动更新元数据，请从 Releases 下载。' : undefined,
+        })
+      } catch (fallbackError) {
+        return publishUpdateState({
+          ok: false,
+          status: 'error',
+          updateAvailable: false,
+          autoUpdateSupported: false,
+          error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError || automaticError),
+        })
+      }
+    }
+  })()
+  try {
+    return await updateCheckPromise
+  } finally {
+    updateCheckPromise = null
+  }
+}
+
+function stopBackgroundProcesses() {
+  for (const { child } of terminalRuns.values()) child.kill()
+  terminalRuns.clear()
+  if (backend) {
+    backend.kill()
+    backend = null
+  }
+}
+
 function startBackend() {
   if (backend) return
   const backendCommand = resolveBackendCommand()
@@ -407,8 +525,16 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
   startBackend()
   createTray()
+  configureAutoUpdater()
   ipcMain.handle('hoya:server-url', () => `http://${serverHost}:${serverPort}`)
   ipcMain.handle('hoya:get-app-version', () => app.getVersion())
+  ipcMain.handle('hoya:check-for-updates', () => checkDesktopUpdates())
+  ipcMain.handle('hoya:install-update', () => {
+    if (currentUpdateState().status !== 'downloaded') return false
+    isQuitting = true
+    autoUpdater.quitAndInstall(false, true)
+    return true
+  })
   ipcMain.handle('hoya:get-language', () => currentLanguage)
   ipcMain.handle('hoya:set-language', (_event, language) => setLanguage(language))
   ipcMain.handle('hoya:get-saved-api-key', (_event, workspace) => savedApiKey(workspace))
@@ -425,7 +551,9 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('hoya:open-external', (_event, url) => {
     const target = String(url || '')
-    if (!/^https?:\/\//i.test(target)) return false
+    const isWebUrl = /^https?:\/\//i.test(target)
+    const isFeedbackEmail = /^mailto:lihongyao517@gmail\.com(?:\?|$)/i.test(target)
+    if (!isWebUrl && !isFeedbackEmail) return false
     shell.openExternal(target)
     return true
   })
@@ -467,12 +595,12 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   isQuitting = true
-  for (const { child } of terminalRuns.values()) child.kill()
-  terminalRuns.clear()
-  if (backend) {
-    backend.kill()
-    backend = null
-  }
+  stopBackgroundProcesses()
+})
+
+app.on('before-quit-for-update', () => {
+  isQuitting = true
+  stopBackgroundProcesses()
 })
 
 app.on('will-quit', () => {

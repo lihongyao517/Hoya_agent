@@ -47,10 +47,14 @@ type Run = { id: string; task: string; status: string; context_summary?: string;
 type Status = { ok?: boolean; workspace?: string; provider?: string; model?: string; allow_shell?: boolean; allow_desktop?: boolean; require_shell_approval?: boolean }
 type CodeBlock = { language: string; code: string }
 type CodeRun = { loading: boolean; expanded: boolean; output: string; ok?: boolean }
+type UpdateInfo = HoyaUpdateInfo
 
 const bridge = window.hoya ?? {
   serverUrl: async () => import.meta.env.DEV ? 'http://127.0.0.1:8787' : '',
   getAppVersion: async () => 'dev',
+  checkForUpdates: async () => ({ ok: false, status: 'error' as const, currentVersion: 'dev', latestVersion: '', updateAvailable: false, autoUpdateSupported: false, progress: 0, releasesUrl: 'https://github.com/lihongyao517/Hoya_agent/releases', error: 'Electron bridge unavailable' }),
+  installUpdate: async () => false,
+  onUpdateStatus: () => () => undefined,
   getLanguage: async () => 'zh-CN' as const,
   setLanguage: async (value: HoyaLanguage) => value,
   getSavedApiKey: async () => '',
@@ -92,7 +96,8 @@ const searchText = ref('')
 const searchResults = ref<Array<{ path: string; score: number; preview?: string }>>([])
 const inspectorTab = ref('run')
 const inspectorOpen = ref(false)
-const configOpen = ref(false)
+const settingsOpen = ref(false)
+const settingsTab = ref('model')
 const configSaving = ref(false)
 const configLoading = ref(false)
 const discovering = ref(false)
@@ -122,6 +127,15 @@ const expandedProjectIds = ref<string[]>([])
 const showArchivedProjects = ref(false)
 const editingCoordinate = ref('')
 const codeRuns = reactive<Record<string, CodeRun>>({})
+const updateChecking = ref(false)
+const updateInfo = ref<UpdateInfo | null>(null)
+const feedbackSubject = ref('Hoya Agent 使用建议')
+const feedbackContent = ref('')
+
+const repositoryUrl = 'https://github.com/lihongyao517/Hoya_agent'
+const tagsUrl = `${repositoryUrl}/tags`
+const releasesUrl = `${repositoryUrl}/releases`
+const authorEmail = 'lihongyao517@gmail.com'
 
 const config = reactive({
   provider: 'openai-compatible' as Provider,
@@ -280,7 +294,7 @@ async function saveConfig() {
     composerModel.value = config.model || composerModel.value
     composerReasoning.value = config.reasoningEffort
     await Promise.all([loadModels(), loadStatus()])
-    configOpen.value = false
+    settingsOpen.value = false
     ElMessage.success('API 配置已保存')
   } catch (error) {
     ElMessage.error(String(error))
@@ -827,6 +841,81 @@ async function changeLanguage(value: HoyaLanguage) {
   language.value = await bridge.setLanguage(value)
 }
 
+async function openUpdatePage() {
+  await bridge.openExternal(updateInfo.value?.releasesUrl || releasesUrl)
+}
+
+const updateTitle = computed(() => {
+  if (!updateInfo.value?.updateAvailable) return ''
+  if (updateInfo.value.status === 'downloaded') return `新版本 ${updateInfo.value.latestVersion} 已就绪`
+  if (updateInfo.value.status === 'downloading') return `正在下载 ${updateInfo.value.latestVersion}`
+  return `发现新版本 ${updateInfo.value.latestVersion}`
+})
+
+const updateDetail = computed(() => {
+  if (updateInfo.value?.status === 'downloaded') return '重启后自动安装'
+  if (updateInfo.value?.status === 'downloading') return `后台下载 ${updateInfo.value.progress}%`
+  if (updateInfo.value?.status === 'manual') return '前往 Releases 下载'
+  return '将在后台自动下载'
+})
+
+async function installDownloadedUpdate() {
+  try {
+    await ElMessageBox.confirm('更新已下载完成。立即重启 Hoya Agent 并安装吗？', '安装更新', { confirmButtonText: '重启安装', cancelButtonText: '稍后', type: 'success' })
+  } catch {
+    return
+  }
+  if (!await bridge.installUpdate()) ElMessage.error('更新尚未下载完成')
+}
+
+async function handleUpdateAction() {
+  if (updateInfo.value?.status === 'downloaded') {
+    await installDownloadedUpdate()
+    return
+  }
+  if (updateInfo.value?.status === 'manual') {
+    await openUpdatePage()
+    return
+  }
+  settingsOpen.value = true
+  settingsTab.value = 'about'
+}
+
+async function checkUpdates(manual = false) {
+  updateChecking.value = true
+  try {
+    const result = await bridge.checkForUpdates()
+    updateInfo.value = result
+    if (!result.ok) {
+      if (manual) ElMessage.error(`检查更新失败：${result.error || '无法连接 GitHub'}`)
+      return
+    }
+    if (result.updateAvailable) {
+      if (manual) {
+        if (result.status === 'downloaded') ElMessage.success(`新版本 ${result.latestVersion} 已下载，重启后自动安装`)
+        else if (result.autoUpdateSupported) ElMessage.success(`发现新版本 ${result.latestVersion}，正在后台下载`)
+        else ElMessage.warning(`发现新版本 ${result.latestVersion}，请从 Releases 下载`)
+      }
+      return
+    }
+    if (manual) ElMessage.success(`当前已是最新版本 ${result.currentVersion}`)
+  } catch (error) {
+    if (manual) ElMessage.error(`检查更新失败：${String(error)}`)
+  } finally {
+    updateChecking.value = false
+  }
+}
+
+async function submitFeedback() {
+  if (!feedbackContent.value.trim()) {
+    ElMessage.warning('请先填写建议内容')
+    return
+  }
+  const mailto = `mailto:${authorEmail}?subject=${encodeURIComponent(feedbackSubject.value.trim() || 'Hoya Agent 使用建议')}&body=${encodeURIComponent(feedbackContent.value.trim())}`
+  const opened = await bridge.openExternal(mailto)
+  if (!opened) ElMessage.error('无法打开默认邮件客户端')
+}
+
 async function initializeWorkspace() {
   await Promise.all([loadStatus(), loadConfig(), loadModels(), loadProjects(), refreshPending(), refreshMemory(), loadHistory()])
   await loadTasks()
@@ -843,6 +932,7 @@ async function initialize() {
 
 let unsubscribeLanguage: () => void = () => undefined
 let unsubscribeMaximized: () => void = () => undefined
+let unsubscribeUpdate: () => void = () => undefined
 
 onMounted(async () => {
   restoreLayout()
@@ -854,14 +944,17 @@ onMounted(async () => {
   ])
   unsubscribeLanguage = bridge.onLanguageChanged((value) => { language.value = value })
   unsubscribeMaximized = bridge.onWindowMaximizedChanged((value) => { windowMaximized.value = value })
+  unsubscribeUpdate = bridge.onUpdateStatus((value) => { updateInfo.value = value })
   window.addEventListener('keydown', handleGlobalKeydown)
   await initialize()
+  void checkUpdates(false)
 })
 
 onBeforeUnmount(() => {
   stopResize()
   unsubscribeLanguage()
   unsubscribeMaximized()
+  unsubscribeUpdate()
   window.removeEventListener('keydown', handleGlobalKeydown)
 })
 </script>
@@ -875,6 +968,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="sidebar-scroll">
+        <button v-if="updateInfo?.updateAvailable" class="sidebar-update" @click="handleUpdateAction"><Refresh :class="{ spinning: updateInfo.status === 'downloading' }" /><span><strong>{{ updateTitle }}</strong><small>{{ updateDetail }}</small></span><Promotion /></button>
         <section class="nav-section">
           <div class="section-heading"><span><FolderOpened />项目</span><el-button text :icon="Box" :class="{ active: showArchivedProjects }" :aria-label="showArchivedProjects ? '隐藏归档项目' : '显示归档项目'" :title="showArchivedProjects ? '隐藏归档项目' : '显示归档项目'" @click="showArchivedProjects = !showArchivedProjects" /></div>
           <div class="project-actions">
@@ -959,7 +1053,7 @@ onBeforeUnmount(() => {
           <el-select v-model="language" class="language-select" size="small" aria-label="语言" @change="changeLanguage"><el-option label="中文" value="zh-CN" /><el-option label="EN" value="en-US" /></el-select>
           <el-button text :class="{ active: workbenchOpen && workbenchTab === 'terminal' }" aria-label="打开或关闭终端" title="终端" @click="toggleWorkbench('terminal')"><span class="terminal-glyph" aria-hidden="true">&gt;_</span></el-button>
           <el-button text :icon="Monitor" :class="{ active: workbenchOpen && workbenchTab === 'browser' }" aria-label="打开或关闭浏览器预览" title="浏览器预览" @click="toggleWorkbench('browser')" />
-          <el-button text :icon="Setting" aria-label="API 配置" title="API 配置" @click="configOpen = true" />
+          <el-button text :icon="Setting" aria-label="设置" title="设置" @click="settingsOpen = true" />
           <el-button text :icon="Menu" aria-label="运行检查器" title="运行检查器" @click="inspectorOpen = !inspectorOpen" />
           <div class="window-controls">
             <el-button text class="window-control" aria-label="最小化" title="最小化" @click="bridge.windowMinimize()"><span class="minimize-symbol" /></el-button>
@@ -1045,18 +1139,43 @@ onBeforeUnmount(() => {
     </aside>
   </div>
 
-  <el-dialog v-model="configOpen" title="API 配置与模型" width="660px" destroy-on-close>
-    <el-form label-position="top" @submit.prevent>
-      <div class="config-grid"><el-form-item label="模型来源"><el-select v-model="config.provider" @change="applyProviderDefaults($event, true)"><el-option v-for="item in providerOptions" :key="item.value" :label="item.label" :value="item.value" /></el-select></el-form-item><el-form-item label="接口类型"><el-select v-model="config.wireApi" :disabled="config.provider !== 'openai-compatible'"><el-option label="Chat Completions" value="chat" /><el-option label="Responses" value="responses" /><el-option label="Messages" value="messages" /></el-select></el-form-item></div>
-      <el-form-item label="API Key"><el-input v-model="config.apiKey" type="password" show-password autocomplete="off" placeholder="Ollama 可留空" /></el-form-item>
-      <el-form-item label="API URL"><el-input v-model="config.baseUrl" :placeholder="config.provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://relay.example.com/v1'" /></el-form-item>
-      <el-form-item label="模型"><div class="model-discovery"><el-select v-model="config.model" filterable allow-create default-first-option><el-option v-for="item in discoveredModels" :key="item.id" :label="item.name" :value="item.id" /></el-select><el-button :icon="Search" :loading="discovering" @click="discoverModels">获取模型</el-button></div></el-form-item>
-      <el-alert v-if="discoveryError" :title="discoveryError" type="error" show-icon />
-      <el-form-item label="推理强度"><el-radio-group v-model="config.reasoningEffort"><el-radio-button v-for="item in reasoningOptions" :key="item.value" :value="item.value">{{ item.label }}</el-radio-button></el-radio-group></el-form-item>
-      <el-checkbox v-model="config.showReasoning">显示公开推理摘要</el-checkbox>
-      <div v-if="modelPresets.length" class="preset-list"><div class="preset-heading">已保存模型</div><div v-for="model in modelPresets" :key="model.id" class="preset-row" :class="{ active: model.id === activeModelId }"><span><strong>{{ model.name }}</strong><small>{{ model.provider }} · {{ model.model }}</small></span><el-button text type="primary" @click="selectPreset(model.id)">使用</el-button><el-button text type="danger" :icon="Delete" aria-label="删除模型预设" @click="deletePreset(model.id)" /></div></div>
-    </el-form>
-    <template #footer><el-button @click="configOpen = false">取消</el-button><el-button :icon="Document" @click="savePreset">保存模型预设</el-button><el-button type="primary" :loading="configSaving || configLoading" @click="saveConfig">保存并重载</el-button></template>
+  <el-dialog v-model="settingsOpen" title="设置" width="720px" class="settings-dialog" destroy-on-close>
+    <el-tabs v-model="settingsTab" class="settings-tabs">
+      <el-tab-pane name="model" label="模型与 API">
+        <el-form label-position="top" @submit.prevent>
+          <div class="config-grid"><el-form-item label="模型来源"><el-select v-model="config.provider" @change="applyProviderDefaults($event, true)"><el-option v-for="item in providerOptions" :key="item.value" :label="item.label" :value="item.value" /></el-select></el-form-item><el-form-item label="接口类型"><el-select v-model="config.wireApi" :disabled="config.provider !== 'openai-compatible'"><el-option label="Chat Completions" value="chat" /><el-option label="Responses" value="responses" /><el-option label="Messages" value="messages" /></el-select></el-form-item></div>
+          <el-form-item label="API Key"><el-input v-model="config.apiKey" type="password" show-password autocomplete="off" placeholder="Ollama 可留空" /></el-form-item>
+          <el-form-item label="API URL"><el-input v-model="config.baseUrl" :placeholder="config.provider === 'ollama' ? 'http://127.0.0.1:11434/v1' : 'https://relay.example.com/v1'" /></el-form-item>
+          <el-form-item label="模型"><div class="model-discovery"><el-select v-model="config.model" filterable allow-create default-first-option><el-option v-for="item in discoveredModels" :key="item.id" :label="item.name" :value="item.id" /></el-select><el-button :icon="Search" :loading="discovering" @click="discoverModels">获取模型</el-button></div></el-form-item>
+          <el-alert v-if="discoveryError" :title="discoveryError" type="error" show-icon />
+          <el-form-item label="推理强度"><el-radio-group v-model="config.reasoningEffort"><el-radio-button v-for="item in reasoningOptions" :key="item.value" :value="item.value">{{ item.label }}</el-radio-button></el-radio-group></el-form-item>
+          <el-checkbox v-model="config.showReasoning">显示公开推理摘要</el-checkbox>
+          <div v-if="modelPresets.length" class="preset-list"><div class="preset-heading">已保存模型</div><div v-for="model in modelPresets" :key="model.id" class="preset-row" :class="{ active: model.id === activeModelId }"><span><strong>{{ model.name }}</strong><small>{{ model.provider }} · {{ model.model }}</small></span><el-button text type="primary" @click="selectPreset(model.id)">使用</el-button><el-button text type="danger" :icon="Delete" aria-label="删除模型预设" @click="deletePreset(model.id)" /></div></div>
+        </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane name="about" label="关于与更新">
+        <div class="settings-section">
+          <div class="settings-row version-row"><div><small>当前工具版本</small><strong>Hoya Agent v{{ appVersion }}</strong></div><el-button :icon="Refresh" :loading="updateChecking || updateInfo?.status === 'checking'" @click="checkUpdates(true)">检查更新</el-button></div>
+          <div v-if="updateInfo?.ok" class="update-status" :class="{ available: updateInfo.updateAvailable }"><span><strong>{{ updateInfo.updateAvailable ? updateTitle : '当前已是最新版本' }}</strong><small>{{ updateInfo.updateAvailable ? updateDetail : `已检查 ${updateInfo.currentVersion}` }}</small><el-progress v-if="updateInfo.status === 'downloading'" :percentage="updateInfo.progress" :stroke-width="6" /></span><el-button v-if="updateInfo.status === 'downloaded'" type="primary" :icon="Refresh" @click="installDownloadedUpdate">重启安装</el-button><el-button v-else-if="updateInfo.status === 'manual'" type="primary" :icon="Promotion" @click="openUpdatePage">前往 Releases</el-button></div>
+          <el-alert v-else-if="updateInfo?.error" :title="`检查更新失败：${updateInfo.error}`" type="warning" :closable="false" show-icon />
+        </div>
+        <div class="settings-section repository-section">
+          <div><small>GitHub 仓库</small><strong>lihongyao517/Hoya_agent</strong><span>{{ repositoryUrl }}</span></div>
+          <div class="settings-actions"><el-button :icon="Promotion" @click="bridge.openExternal(repositoryUrl)">打开 GitHub</el-button><el-button text @click="bridge.openExternal(tagsUrl)">查看 Tags</el-button></div>
+        </div>
+      </el-tab-pane>
+
+      <el-tab-pane name="feedback" label="提交建议">
+        <div class="feedback-intro"><small>联系作者</small><strong>{{ authorEmail }}</strong><p>填写后将打开系统默认邮件客户端，由你确认并发送。</p><el-button text :icon="CopyDocument" @click="copyText(authorEmail)">复制邮箱</el-button></div>
+        <el-form label-position="top" @submit.prevent>
+          <el-form-item label="邮件主题"><el-input v-model="feedbackSubject" maxlength="120" show-word-limit /></el-form-item>
+          <el-form-item label="建议内容"><el-input v-model="feedbackContent" type="textarea" :rows="8" maxlength="4000" show-word-limit placeholder="请描述使用场景、遇到的问题或希望增加的功能" /></el-form-item>
+          <el-button type="primary" :icon="Promotion" :disabled="!feedbackContent.trim()" @click="submitFeedback">提交建议给作者</el-button>
+        </el-form>
+      </el-tab-pane>
+    </el-tabs>
+    <template #footer><div class="settings-footer"><template v-if="settingsTab === 'model'"><el-button @click="settingsOpen = false">取消</el-button><el-button :icon="Document" @click="savePreset">保存模型预设</el-button><el-button type="primary" :loading="configSaving || configLoading" @click="saveConfig">保存并重载</el-button></template><el-button v-else @click="settingsOpen = false">关闭</el-button></div></template>
   </el-dialog>
 
   <el-dialog v-model="projectDialogOpen" title="新建项目" width="480px">
@@ -1127,6 +1246,13 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
 .connection-dot { width: 6px; height: 6px; border-radius: 50%; background: #c4544e; }
 .connection-dot.ready { background: #18a37d; }
 .sidebar-scroll { min-height: 0; overflow-y: auto; padding: 9px 10px 20px; }
+.sidebar-update { display: grid; grid-template-columns: 18px minmax(0, 1fr) 14px; align-items: center; gap: 8px; width: 100%; min-height: 52px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid #b8d8d0; border-radius: 7px; color: #0d6656; background: #def1eb; cursor: pointer; text-align: left; }
+.sidebar-update:hover { border-color: #79afa4; background: #d2ebe4; }
+.sidebar-update > svg { width: 15px; }
+.sidebar-update span { min-width: 0; }
+.sidebar-update strong, .sidebar-update small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-update strong { font-size: 11px; }
+.sidebar-update small { margin-top: 3px; color: #557d74; font-size: 9px; }
 .nav-section { display: grid; gap: 5px; padding: 4px 0 12px; }
 .nav-section + .nav-section { padding-top: 10px; border-top: 1px solid rgba(213, 221, 218, .72); }
 .section-heading { display: flex; align-items: center; justify-content: space-between; min-height: 36px; padding: 4px 7px; color: #62716c; font-size: 11.5px; font-weight: 650; }
@@ -1294,6 +1420,32 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
 .preset-row.active { background: #edf7f4; }
 .preset-row strong, .preset-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preset-row small { color: #81908a; font-size: 10px; }
+.settings-dialog :deep(.el-dialog__body) { padding-top: 8px; }
+.settings-tabs :deep(.el-tabs__content) { min-height: 410px; }
+.settings-section { padding: 18px 0; border-bottom: 1px solid var(--border); }
+.settings-section:first-child { padding-top: 4px; }
+.settings-section:last-child { border-bottom: 0; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.settings-row > div, .repository-section > div { min-width: 0; }
+.settings-row small, .repository-section small, .feedback-intro small { display: block; margin-bottom: 5px; color: #7a8984; font-size: 10px; }
+.settings-row strong, .repository-section strong, .feedback-intro strong { display: block; color: #24312d; font-size: 15px; }
+.version-row strong { font-family: "Cascadia Code", Consolas, monospace; }
+.update-status { display: flex; align-items: flex-start; gap: 9px; margin-top: 14px; padding: 11px 12px; border: 1px solid #d8e2df; border-radius: 7px; color: #53635e; background: #f3f6f5; font-size: 11px; line-height: 1.5; }
+.update-status.available { border-color: #a9d1c8; color: #0d6656; background: #e5f3ef; }
+.update-status > svg { flex: 0 0 auto; width: 15px; margin-top: 1px; }
+.update-status > span { flex: 1; min-width: 0; }
+.update-status strong, .update-status small { display: block; }
+.update-status small { margin-top: 2px; color: #5f7f77; }
+.update-status :deep(.el-progress) { margin-top: 9px; }
+.update-status :deep(.el-button) { flex: 0 0 auto; margin-left: auto; }
+.repository-section { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.repository-section span { display: block; overflow: hidden; margin-top: 5px; color: #71807b; font: 10px/1.4 "Cascadia Code", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.settings-actions, .settings-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.settings-actions :deep(.el-button), .settings-footer :deep(.el-button) { margin: 0; }
+.feedback-intro { position: relative; padding: 4px 128px 18px 0; border-bottom: 1px solid var(--border); }
+.feedback-intro p { margin: 7px 0 0; color: #697772; font-size: 11px; line-height: 1.5; }
+.feedback-intro > :deep(.el-button) { position: absolute; top: 4px; right: 0; }
+.settings-tabs :deep(.el-form) { margin-top: 18px; }
 @media (max-width: 1180px) {
   .hoya-shell, .hoya-shell.inspector-open { grid-template-columns: var(--sidebar-width) 5px minmax(0, 1fr); }
   .inspector { position: fixed; z-index: 50; top: 0; right: 0; bottom: 0; width: var(--inspector-width); box-shadow: -18px 0 44px rgba(26,33,44,.16); }

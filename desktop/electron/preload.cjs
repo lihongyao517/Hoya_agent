@@ -3,6 +3,13 @@ const { contextBridge, ipcRenderer } = require('electron')
 contextBridge.exposeInMainWorld('hoya', {
   serverUrl: () => ipcRenderer.invoke('hoya:server-url'),
   getAppVersion: () => ipcRenderer.invoke('hoya:get-app-version'),
+  checkForUpdates: () => ipcRenderer.invoke('hoya:check-for-updates'),
+  installUpdate: () => ipcRenderer.invoke('hoya:install-update'),
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status)
+    ipcRenderer.on('hoya:update-status', listener)
+    return () => ipcRenderer.removeListener('hoya:update-status', listener)
+  },
   getLanguage: () => ipcRenderer.invoke('hoya:get-language'),
   setLanguage: (language) => ipcRenderer.invoke('hoya:set-language', language),
   getSavedApiKey: (workspace) => ipcRenderer.invoke('hoya:get-saved-api-key', workspace),

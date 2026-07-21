@@ -1,6 +1,6 @@
 {
   "name": "hoya-agent-desktop",
-  "version": "0.1.3",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -8,15 +8,18 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ../build_backend.ps1",
     "build:renderer": "vue-tsc --noEmit && vite build",
+    "test:electron": "node --test tests/*.test.cjs",
     "build": "npm run build:renderer",
     "pack": "npm run build:renderer && electron-builder --dir",
     "clean:old-artifacts": "node scripts/clean-old-artifacts.cjs",
     "dist": "npm run build:renderer && electron-builder && npm run clean:old-artifacts",
     "dist:full": "npm run build:backend && npm run dist",
+    "release:github": "npm run build:backend && npm run build:renderer && electron-builder --publish always && npm run clean:old-artifacts",
     "start": "electron ."
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
+    "electron-updater": "^6.8.9",
     "element-plus": "^2.14.3",
     "vue": "^3.5.40"
   },
@@ -49,6 +52,14 @@
         "filter": [
           "**/*"
         ]
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lihongyao517",
+        "repo": "Hoya_agent",
+        "releaseType": "release"
       }
     ],
     "win": {
