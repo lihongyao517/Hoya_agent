@@ -101,9 +101,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.terminal-panel { display: grid; grid-template-rows: 44px minmax(0, 1fr) 48px; height: 100%; min-height: 0; background: #171d1b; color: #dfe8e4; }
+.terminal-panel { display: grid; grid-template-rows: 44px minmax(0, 1fr) 48px; height: 100%; min-height: 0; background: #0e0f10; color: #e3e5e7; }
 .panel-toolbar, .terminal-input-row, .terminal-context, .toolbar-actions { display: flex; align-items: center; }
-.panel-toolbar { justify-content: space-between; gap: 12px; padding: 0 10px 0 14px; border-bottom: 1px solid #2c3532; background: #1e2523; }
+.panel-toolbar { justify-content: space-between; gap: 12px; padding: 0 10px 0 14px; border-bottom: 1px solid #303236; background: #191a1b; }
 .terminal-context { min-width: 0; gap: 8px; }
 .terminal-context strong { font-size: 12px; font-weight: 650; }
 .terminal-context small { overflow: hidden; color: #84928d; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
@@ -115,9 +115,9 @@ onBeforeUnmount(() => {
 .terminal-output .stdout { color: #dfe8e4; }
 .terminal-output .stderr { color: #ff9c94; }
 .terminal-output .system { color: #8fa09a; }
-.terminal-input-row { gap: 8px; padding: 7px 10px; border-top: 1px solid #2c3532; background: #1e2523; }
+.terminal-input-row { gap: 8px; padding: 7px 10px; border-top: 1px solid #303236; background: #191a1b; }
 .terminal-prompt { color: #2dd4bf; font: 700 12px "Cascadia Code", Consolas, monospace; }
-.terminal-input-row :deep(.el-input__wrapper) { border: 1px solid #394440; background: #141917; box-shadow: none; }
+.terminal-input-row :deep(.el-input__wrapper) { border: 1px solid #3a3c40; border-radius: 8px; background: #111213; box-shadow: none; }
 .terminal-input-row :deep(.el-input__inner) { color: #eef5f2; font-family: "Cascadia Code", Consolas, monospace; }
 .terminal-input-row :deep(.el-input__wrapper.is-focus) { border-color: #2aa896; box-shadow: 0 0 0 2px rgba(45, 212, 191, .12); }
 .panel-toolbar :deep(.el-button) { min-width: 40px; color: #aab7b2; }

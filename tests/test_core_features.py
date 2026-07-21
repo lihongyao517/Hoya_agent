@@ -103,6 +103,30 @@ class ProjectSettingsTests(unittest.TestCase):
             settings.remove_project(project["id"])
             self.assertEqual(settings.list_projects(include_archived=True), [])
 
+    def test_selecting_project_does_not_change_project_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = UserSettingsStore(root / "settings.json")
+            first_path = root / "first"
+            second_path = root / "second"
+            first_path.mkdir()
+            second_path.mkdir()
+            first = settings.remember_project(first_path, "First")
+            second = settings.remember_project(second_path, "Second")
+            data = settings.load()
+            for project in data["projects"]:
+                project["updated_at"] = "2026-01-01T00:00:00" if project["id"] == first["id"] else "2026-01-02T00:00:00"
+            settings.save(data)
+
+            before = [project["id"] for project in settings.list_projects()]
+            selected = settings.select_project(first_path)
+            after = [project["id"] for project in settings.list_projects()]
+
+            self.assertEqual(before, [second["id"], first["id"]])
+            self.assertEqual(after, before)
+            self.assertEqual(selected["id"], first["id"])
+            self.assertEqual(settings.load()["last_workspace"], str(first_path.resolve()))
+
     def test_model_presets_keep_api_key_for_reopen(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"

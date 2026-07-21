@@ -48,6 +48,7 @@ type Status = { ok?: boolean; workspace?: string; provider?: string; model?: str
 type CodeBlock = { language: string; code: string }
 type CodeRun = { loading: boolean; expanded: boolean; output: string; ok?: boolean }
 type UpdateInfo = HoyaUpdateInfo
+type ContextMenuState = { kind: 'project' | 'task'; x: number; y: number; project?: Project; task?: Task }
 
 const bridge = window.hoya ?? {
   serverUrl: async () => import.meta.env.DEV ? 'http://127.0.0.1:8787' : '',
@@ -129,6 +130,9 @@ const editingCoordinate = ref('')
 const codeRuns = reactive<Record<string, CodeRun>>({})
 const updateChecking = ref(false)
 const updateInfo = ref<UpdateInfo | null>(null)
+const contextMenu = ref<ContextMenuState | null>(null)
+const hoveredAnchorPosition = ref(-1)
+const activeAnchorPosition = ref(0)
 const feedbackSubject = ref('Hoya Agent 使用建议')
 const feedbackContent = ref('')
 
@@ -177,6 +181,7 @@ const activeTask = computed(() => tasks.value.find((item) => item.id === activeT
 const visibleProjects = computed(() => projects.value.filter((project) => showArchivedProjects.value || !project.archived || project.path === workspace.value))
 const lastUserMessage = computed(() => [...messages.value].reverse().find((message) => message.role === 'user'))
 const questionAnchors = computed(() => messages.value.flatMap((message, index) => message.role === 'user' ? [{ index, coordinate: messageCoordinate(index), preview: message.content.split(/\r?\n/, 1)[0] }] : []))
+const contextMenuStyle = computed(() => contextMenu.value ? { left: `${contextMenu.value.x}px`, top: `${contextMenu.value.y}px` } : {})
 const modelOptions = computed(() => {
   const values = [
     ...discoveredModels.value.map((item) => ({ id: item.id, name: item.name })),
@@ -453,6 +458,42 @@ async function handleProjectCommand(project: Project, command: string) {
   else if (command === 'reveal') await bridge.openPath(project.path)
 }
 
+function openContextMenu(event: MouseEvent, menu: Omit<ContextMenuState, 'x' | 'y'>) {
+  event.preventDefault()
+  event.stopPropagation()
+  const width = 232
+  const height = menu.kind === 'project' ? 286 : 164
+  contextMenu.value = {
+    ...menu,
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+  }
+}
+
+function closeContextMenu() {
+  contextMenu.value = null
+}
+
+function handleGlobalPointerDown(event: PointerEvent) {
+  const target = event.target
+  if (target instanceof Element && target.closest('.hoya-context-menu')) return
+  closeContextMenu()
+}
+
+async function handleContextMenuCommand(command: string) {
+  const menu = contextMenu.value
+  closeContextMenu()
+  if (!menu) return
+  if (menu.kind === 'project' && menu.project) {
+    await handleProjectCommand(menu.project, command)
+    return
+  }
+  if (menu.kind === 'task' && menu.task) {
+    if (menu.project && menu.project.path !== workspace.value) await selectProject(menu.project, menu.task.id)
+    handleTaskCommand(menu.task, command)
+  }
+}
+
 async function beginCreateProject() {
   const parent = await bridge.selectDirectory()
   if (!parent) return
@@ -501,7 +542,35 @@ function reusePrompt(message: Message, index?: number) {
 }
 
 function jumpToMessage(index: number) {
+  const position = questionAnchors.value.findIndex((anchor) => anchor.index === index)
+  if (position >= 0) activeAnchorPosition.value = position
   document.getElementById(`message-${index}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+function syncActiveAnchor() {
+  if (!chatScroll.value || !questionAnchors.value.length) return
+  const center = chatScroll.value.getBoundingClientRect().top + chatScroll.value.clientHeight / 2
+  let nearestPosition = 0
+  let nearestDistance = Number.POSITIVE_INFINITY
+  questionAnchors.value.forEach((anchor, position) => {
+    const element = document.getElementById(`message-${anchor.index}`)
+    if (!element) return
+    const distance = Math.abs(element.getBoundingClientRect().top - center)
+    if (distance < nearestDistance) {
+      nearestDistance = distance
+      nearestPosition = position
+    }
+  })
+  activeAnchorPosition.value = nearestPosition
+}
+
+function coordinateMarkerStyle(position: number) {
+  const focus = hoveredAnchorPosition.value >= 0 ? hoveredAnchorPosition.value : activeAnchorPosition.value
+  const distance = Math.abs(position - focus)
+  const scale = distance === 0 ? 2.25 : distance === 1 ? 1.65 : distance === 2 ? 1.3 : 1
+  const color = distance === 0 ? '#4f8cff' : distance === 1 ? '#3d70bd' : distance === 2 ? '#2b527f' : '#263039'
+  const opacity = distance === 0 ? 1 : distance === 1 ? .82 : distance === 2 ? .62 : .38
+  return { '--coordinate-scale': String(scale), '--coordinate-color': color, '--coordinate-opacity': String(opacity) }
 }
 
 function runnableCodeBlocks(content: string): CodeBlock[] {
@@ -911,9 +980,14 @@ async function submitFeedback() {
     ElMessage.warning('请先填写建议内容')
     return
   }
-  const mailto = `mailto:${authorEmail}?subject=${encodeURIComponent(feedbackSubject.value.trim() || 'Hoya Agent 使用建议')}&body=${encodeURIComponent(feedbackContent.value.trim())}`
-  const opened = await bridge.openExternal(mailto)
-  if (!opened) ElMessage.error('无法打开默认邮件客户端')
+  const composeUrl = new URL('https://mail.google.com/mail/')
+  composeUrl.searchParams.set('view', 'cm')
+  composeUrl.searchParams.set('fs', '1')
+  composeUrl.searchParams.set('to', authorEmail)
+  composeUrl.searchParams.set('su', feedbackSubject.value.trim() || 'Hoya Agent 使用建议')
+  composeUrl.searchParams.set('body', feedbackContent.value.trim())
+  const opened = await bridge.openExternal(composeUrl.toString())
+  if (!opened) ElMessage.error('无法在浏览器中打开写信页面')
 }
 
 async function initializeWorkspace() {
@@ -946,6 +1020,9 @@ onMounted(async () => {
   unsubscribeMaximized = bridge.onWindowMaximizedChanged((value) => { windowMaximized.value = value })
   unsubscribeUpdate = bridge.onUpdateStatus((value) => { updateInfo.value = value })
   window.addEventListener('keydown', handleGlobalKeydown)
+  window.addEventListener('pointerdown', handleGlobalPointerDown, true)
+  window.addEventListener('resize', closeContextMenu)
+  window.addEventListener('blur', closeContextMenu)
   await initialize()
   void checkUpdates(false)
 })
@@ -956,6 +1033,9 @@ onBeforeUnmount(() => {
   unsubscribeMaximized()
   unsubscribeUpdate()
   window.removeEventListener('keydown', handleGlobalKeydown)
+  window.removeEventListener('pointerdown', handleGlobalPointerDown, true)
+  window.removeEventListener('resize', closeContextMenu)
+  window.removeEventListener('blur', closeContextMenu)
 })
 </script>
 
@@ -975,15 +1055,15 @@ onBeforeUnmount(() => {
             <el-button :icon="FolderAdd" @click="beginCreateProject">新建项目</el-button>
             <el-button :icon="FolderOpened" @click="chooseWorkspace">打开项目</el-button>
           </div>
-          <el-dropdown v-for="project in visibleProjects" :key="project.id" :trigger="['click', 'contextmenu']" placement="bottom-start" @command="handleProjectCommand(project, $event)">
+          <el-dropdown v-for="project in visibleProjects" :key="project.id" trigger="click" placement="bottom-start" @command="handleProjectCommand(project, $event)">
             <div class="project-group" :class="{ archived: project.archived }">
-              <div class="project-row" :class="{ active: project.path === workspace, missing: project.exists === false }" :title="project.path">
+              <div class="project-row" :class="{ active: project.path === workspace, missing: project.exists === false }" :title="project.path" @contextmenu="openContextMenu($event, { kind: 'project', project })">
                 <button class="project-main" @click.stop="toggleProject(project)"><CaretRight class="project-caret" :class="{ expanded: expandedProjectIds.includes(project.id) }" /><FolderOpened /><span><strong>{{ project.name }}</strong><small>{{ project.path }}</small></span></button>
                 <el-button text :icon="MoreFilled" aria-label="项目菜单" title="项目菜单；也可以右键项目" />
               </div>
               <div v-if="expandedProjectIds.includes(project.id)" class="project-task-list">
                 <button class="project-new-task" @click.stop="createTaskInProject(project)"><Plus />在此项目新建任务</button>
-                <button v-for="task in project.tasks ?? []" :key="task.id" class="project-task" :class="{ active: project.path === workspace && task.id === activeTaskId }" @click.stop="selectProject(project, task.id)"><span class="task-marker" />{{ task.title }}</button>
+                <button v-for="task in project.tasks ?? []" :key="task.id" class="project-task" :class="{ active: project.path === workspace && task.id === activeTaskId }" @click.stop="selectProject(project, task.id)" @contextmenu="openContextMenu($event, { kind: 'task', project, task })"><span class="task-marker" />{{ task.title }}</button>
                 <small v-if="!(project.tasks ?? []).length" class="project-empty">暂无任务</small>
               </div>
             </div>
@@ -1005,7 +1085,7 @@ onBeforeUnmount(() => {
           <div class="section-heading"><span><Document />任务</span><el-button text :icon="Plus" aria-label="新建任务" title="新建任务" @click="createTask" /></div>
           <button class="new-task-button" @click="createTask"><Plus />新建任务</button>
           <div class="task-list">
-            <div v-for="task in tasks" :key="task.id" class="task-row" :class="{ active: task.id === activeTaskId }" :style="{ '--task-color': taskColors.find((item) => item.value === (task.color || ''))?.color }">
+            <div v-for="task in tasks" :key="task.id" class="task-row" :class="{ active: task.id === activeTaskId }" :style="{ '--task-color': taskColors.find((item) => item.value === (task.color || ''))?.color }" @contextmenu="openContextMenu($event, { kind: 'task', task })">
               <span class="task-marker" />
               <template v-if="taskEditingId === task.id">
                 <el-input v-model="taskTitleDraft" size="small" @keyup.enter="saveTaskTitle(task)" />
@@ -1047,10 +1127,11 @@ onBeforeUnmount(() => {
 
     <main class="main-column">
       <header class="topbar">
-        <div class="topbar-title"><span>当前任务</span><strong>{{ activeTask?.title || '新任务' }}</strong></div>
+        <div class="topbar-title"><FolderOpened /><span><small>当前任务</small><strong>{{ activeTask?.title || '新任务' }}</strong></span></div>
         <div class="top-actions">
           <span class="run-state" :class="busy ? 'busy' : connected ? 'ready' : 'error'">{{ busy ? '运行中' : connected ? '就绪' : '离线' }}</span>
           <el-select v-model="language" class="language-select" size="small" aria-label="语言" @change="changeLanguage"><el-option label="中文" value="zh-CN" /><el-option label="EN" value="en-US" /></el-select>
+          <el-button class="open-location" :icon="FolderOpened" :disabled="!workspace" @click="bridge.openPath(workspace)">打开位置</el-button>
           <el-button text :class="{ active: workbenchOpen && workbenchTab === 'terminal' }" aria-label="打开或关闭终端" title="终端" @click="toggleWorkbench('terminal')"><span class="terminal-glyph" aria-hidden="true">&gt;_</span></el-button>
           <el-button text :icon="Monitor" :class="{ active: workbenchOpen && workbenchTab === 'browser' }" aria-label="打开或关闭浏览器预览" title="浏览器预览" @click="toggleWorkbench('browser')" />
           <el-button text :icon="Setting" aria-label="设置" title="设置" @click="settingsOpen = true" />
@@ -1065,9 +1146,9 @@ onBeforeUnmount(() => {
 
       <div class="workspace-stage">
         <section class="chat-pane">
-          <div ref="chatScroll" class="message-list">
-            <nav v-if="questionAnchors.length" class="conversation-coordinates" aria-label="历史提问坐标">
-              <button v-for="anchor in questionAnchors" :key="anchor.index" :title="anchor.preview" @click="jumpToMessage(anchor.index)"><Position />{{ anchor.coordinate }}</button>
+          <div ref="chatScroll" class="message-list" @scroll.passive="syncActiveAnchor">
+            <nav v-if="questionAnchors.length" class="conversation-coordinates" aria-label="历史提问坐标" @mouseleave="hoveredAnchorPosition = -1">
+              <button v-for="(anchor, position) in questionAnchors" :key="anchor.index" :style="coordinateMarkerStyle(position)" :aria-label="`${anchor.coordinate}：${anchor.preview}`" @mouseenter="hoveredAnchorPosition = position" @focus="hoveredAnchorPosition = position" @blur="hoveredAnchorPosition = -1" @click="jumpToMessage(anchor.index)"><span class="coordinate-tooltip"><strong>{{ anchor.coordinate }}</strong>{{ anchor.preview }}</span><span class="coordinate-tick" /></button>
             </nav>
             <div v-if="messages.length === 0" class="empty-state">
               <h1>开始构建</h1>
@@ -1093,6 +1174,7 @@ onBeforeUnmount(() => {
             <el-input ref="composerInput" v-model="messageInput" type="textarea" :rows="3" resize="none" placeholder="描述你想要的修改或调查…" @input="maintainComposerFocus" @keydown.enter.exact.prevent="sendTask" />
             <div class="composer-controls">
               <el-button v-if="lastUserMessage" text size="small" :icon="EditPen" @click="reusePrompt(lastUserMessage)">编辑上一条</el-button>
+              <span class="access-mode"><SwitchButton />完全访问</span>
               <el-select v-model="composerModel" filterable size="small" placeholder="选择模型" class="model-select" @change="applyComposerSelection"><el-option v-for="model in modelOptions" :key="model.id" :label="model.name" :value="model.id" /></el-select>
               <el-radio-group v-model="composerReasoning" size="small" aria-label="推理强度" @change="applyComposerSelection"><el-radio-button v-for="option in reasoningOptions" :key="option.value" :value="option.value">{{ option.label }}</el-radio-button></el-radio-group>
               <el-button v-if="busy" type="danger" :icon="Loading" :loading="stopping" @click="stopTask">停止</el-button>
@@ -1116,16 +1198,21 @@ onBeforeUnmount(() => {
     <div v-show="inspectorOpen" class="resize-handle vertical inspector-resizer" aria-hidden="true" @pointerdown="startResize('inspector', $event)" />
 
     <aside class="inspector" :class="{ open: inspectorOpen }" :aria-hidden="!inspectorOpen">
-      <div class="inspector-title"><div><span>INSPECTOR</span><strong>运行检查器</strong></div><el-button text :icon="Close" aria-label="关闭检查器" @click="inspectorOpen = false" /></div>
+      <div class="inspector-title"><div><span>WORKSPACE</span><strong>环境与审阅</strong></div><el-button text :icon="Close" aria-label="关闭检查器" @click="inspectorOpen = false" /></div>
       <el-tabs v-model="inspectorTab" stretch>
-        <el-tab-pane name="run" label="运行">
+        <el-tab-pane name="run" label="环境">
           <div class="inspector-scroll">
+            <section class="environment-card">
+              <div class="environment-heading"><strong>环境信息</strong><span class="connection-dot" :class="{ ready: connected }" /></div>
+              <div class="environment-row"><span>变更</span><strong>{{ currentRun?.changes?.length ?? 0 }} 个文件</strong></div>
+              <div class="environment-row"><span>本地</span><strong :title="workspace">{{ workspace || '未选择项目' }}</strong></div>
+              <div class="environment-row"><span>后台进程</span><strong>{{ busy ? '任务运行中' : '空闲' }}</strong></div>
+            </section>
             <section v-if="currentRun" class="run-card"><div class="run-title"><strong>{{ currentRun.task }}</strong><el-tag size="small" effect="plain">{{ currentRun.status }}</el-tag></div><p>{{ currentRun.context_summary }}</p><el-steps direction="vertical" :active="(currentRun.plan ?? []).filter((item) => item.status === 'completed').length" finish-status="success"><el-step v-for="item in currentRun.plan" :key="item.id" :title="item.title" :description="item.note" /></el-steps><div v-for="change in currentRun.changes" :key="change.version_id" class="change-row"><span><CircleCheck v-if="change.verification?.ok" /><span>{{ change.path }}</span></span><el-button text type="warning" :disabled="Boolean(change.rolled_back_at)" @click="rollback(change)">回滚</el-button></div></section>
-            <el-empty v-else description="运行任务后显示计划与校验结果" :image-size="56" />
             <div class="activity-list"><div v-for="(item, index) in activities" :key="index" class="activity-row"><span class="activity-dot" /><div><small>{{ item.type }}</small><strong>{{ item.title }}</strong><pre v-if="item.body">{{ item.body }}</pre></div></div></div>
           </div>
         </el-tab-pane>
-        <el-tab-pane name="approvals" :label="`审批${pending.length ? ` ${pending.length}` : ''}`">
+        <el-tab-pane name="approvals" :label="`审阅${pending.length ? ` ${pending.length}` : ''}`">
           <div class="inspector-scroll"><el-empty v-if="!pending.length" description="暂无待审批操作" :image-size="56" /><section v-for="item in pending" :key="item.id" class="approval-card"><div><el-tag size="small" :type="item.risk?.level === 'high' ? 'danger' : 'warning'">{{ item.risk?.level || 'review' }}</el-tag><strong>{{ item.path || item.command }}</strong></div><pre v-if="item.diff">{{ item.diff }}</pre><div class="approval-actions"><el-button type="primary" @click="decidePending(item, 'approved')">批准并继续</el-button><el-button @click="decidePending(item, 'denied')">拒绝</el-button></div></section></div>
         </el-tab-pane>
         <el-tab-pane name="memory" label="记忆">
@@ -1138,6 +1225,27 @@ onBeforeUnmount(() => {
       </el-tabs>
     </aside>
   </div>
+
+  <Teleport to="body">
+    <div v-if="contextMenu" class="hoya-context-menu" :style="contextMenuStyle" role="menu" @contextmenu.prevent>
+      <template v-if="contextMenu.kind === 'project'">
+        <button role="menuitem" @click="handleContextMenuCommand('open')"><FolderOpened />打开项目</button>
+        <button role="menuitem" @click="handleContextMenuCommand('new-task')"><Plus />在此项目新建任务</button>
+        <button role="menuitem" @click="handleContextMenuCommand('rename')"><EditPen />重命名显示名称</button>
+        <button role="menuitem" @click="handleContextMenuCommand('reveal')"><Promotion />在资源管理器中打开</button>
+        <button role="menuitem" @click="handleContextMenuCommand('copy-path')"><CopyDocument />复制项目路径</button>
+        <span class="context-menu-separator" />
+        <button role="menuitem" @click="handleContextMenuCommand('archive')"><Box />{{ contextMenu.project?.archived ? '取消归档' : '归档项目' }}</button>
+        <button class="danger" role="menuitem" @click="handleContextMenuCommand('delete')"><Delete />从列表删除</button>
+      </template>
+      <template v-else>
+        <button role="menuitem" @click="handleContextMenuCommand('rename')"><EditPen />重命名任务</button>
+        <div class="context-color-section"><small>任务颜色</small><div class="context-color-grid"><button v-for="color in taskColors" :key="color.value" :aria-label="color.label" :title="color.label" @click="handleContextMenuCommand(`color:${color.value}`)"><span :style="{ background: color.color }" /></button></div></div>
+        <span class="context-menu-separator" />
+        <button class="danger" role="menuitem" @click="handleContextMenuCommand('delete')"><Delete />删除任务</button>
+      </template>
+    </div>
+  </Teleport>
 
   <el-dialog v-model="settingsOpen" title="设置" width="720px" class="settings-dialog" destroy-on-close>
     <el-tabs v-model="settingsTab" class="settings-tabs">
@@ -1167,7 +1275,7 @@ onBeforeUnmount(() => {
       </el-tab-pane>
 
       <el-tab-pane name="feedback" label="提交建议">
-        <div class="feedback-intro"><small>联系作者</small><strong>{{ authorEmail }}</strong><p>填写后将打开系统默认邮件客户端，由你确认并发送。</p><el-button text :icon="CopyDocument" @click="copyText(authorEmail)">复制邮箱</el-button></div>
+        <div class="feedback-intro"><small>联系作者</small><strong>{{ authorEmail }}</strong><p>填写后将在浏览器中打开 Gmail 写信页面，由你确认并发送。</p><el-button text :icon="CopyDocument" @click="copyText(authorEmail)">复制邮箱</el-button></div>
         <el-form label-position="top" @submit.prevent>
           <el-form-item label="邮件主题"><el-input v-model="feedbackSubject" maxlength="120" show-word-limit /></el-form-item>
           <el-form-item label="建议内容"><el-input v-model="feedbackContent" type="textarea" :rows="8" maxlength="4000" show-word-limit placeholder="请描述使用场景、遇到的问题或希望增加的功能" /></el-form-item>
@@ -1186,28 +1294,42 @@ onBeforeUnmount(() => {
 
 <style>
 :root {
-  --bg: #f7f9f8;
-  --surface: #ffffff;
-  --surface-subtle: #f2f5f4;
-  --text: #17201e;
-  --text-secondary: #46534f;
-  --text-muted: #70807b;
-  --border: #dbe3e0;
-  --border-strong: #c5d1cd;
-  --primary: #0f766e;
-  --primary-hover: #0b5f59;
-  --primary-soft: #dff3ee;
-  --sidebar: #eef2f0;
-  --sidebar-hover: #e2e9e6;
-  --sidebar-border: #d5ddda;
-  --el-color-primary: #0f766e;
-  --el-color-primary-light-3: #4b9b91;
-  --el-color-primary-light-5: #83bab2;
-  --el-color-primary-light-7: #bddbd6;
-  --el-color-primary-light-8: #d9ebe7;
-  --el-color-primary-light-9: #edf7f4;
-  --el-color-primary-dark-2: #0b5f59;
-  --el-border-radius-base: 6px;
+  --bg: #111213;
+  --surface: #1b1c1e;
+  --surface-subtle: #202123;
+  --text: #f2f3f4;
+  --text-secondary: #c5c7ca;
+  --text-muted: #8b8e94;
+  --border: #313337;
+  --border-strong: #42454a;
+  --primary: #4f9f91;
+  --primary-hover: #65b4a5;
+  --primary-soft: #213a36;
+  --sidebar: #191b20;
+  --sidebar-hover: #252830;
+  --sidebar-border: #30333a;
+  --el-color-primary: #4f9f91;
+  --el-color-primary-light-3: #72b5aa;
+  --el-color-primary-light-5: #91c7be;
+  --el-color-primary-light-7: #b7d9d3;
+  --el-color-primary-light-8: #d1e6e2;
+  --el-color-primary-light-9: #e8f2f0;
+  --el-color-primary-dark-2: #3f8075;
+  --el-bg-color: #1b1c1e;
+  --el-bg-color-overlay: #242527;
+  --el-fill-color-blank: #1b1c1e;
+  --el-fill-color-light: #25272a;
+  --el-fill-color-lighter: #2b2d30;
+  --el-fill-color-extra-light: #303236;
+  --el-text-color-primary: #f2f3f4;
+  --el-text-color-regular: #c5c7ca;
+  --el-text-color-secondary: #989ba1;
+  --el-text-color-placeholder: #72767d;
+  --el-border-color: #383a3f;
+  --el-border-color-light: #313338;
+  --el-border-color-lighter: #292b2f;
+  --el-mask-color: rgba(0, 0, 0, .68);
+  --el-border-radius-base: 8px;
   font-family: "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   color: var(--text);
   background: var(--bg);
@@ -1216,10 +1338,11 @@ onBeforeUnmount(() => {
 html, body, #root { width: 100%; height: 100%; min-width: 980px; min-height: 640px; margin: 0; overflow: hidden; }
 *, *::before, *::after { box-sizing: border-box; letter-spacing: 0; }
 button, input, textarea, select { font: inherit; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid rgba(15, 118, 110, .38); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid rgba(79, 159, 145, .68); outline-offset: 2px; }
 .el-button { min-height: 40px; border-radius: 7px; }
 .el-button.is-text { min-width: 40px; padding: 8px; border-radius: 7px; }
-.el-dialog { border-radius: 8px; }
+.el-dialog { border: 1px solid var(--border); border-radius: 12px; background: #1b1c1e; }
+.el-message-box, .el-popper.is-light { border-color: var(--border) !important; background: #242527 !important; }
 body.resizing-column, body.resizing-column * { cursor: col-resize !important; user-select: none !important; }
 body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-select: none !important; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; scroll-behavior: auto !important; } }
@@ -1328,11 +1451,14 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
 .workspace-stage { display: grid; grid-template-rows: minmax(0, 1fr) 0 0; min-height: 0; }
 .workbench-open .workspace-stage { grid-template-rows: minmax(240px, 1fr) 5px var(--workbench-height); }
 .chat-pane { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-width: 0; min-height: 0; overflow: hidden; }
-.message-list { min-height: 0; overflow-y: auto; padding: 34px clamp(28px, 5vw, 72px) 20px; }
-.conversation-coordinates { position: sticky; z-index: 8; top: 0; float: right; display: grid; gap: 4px; width: 58px; margin-right: -54px; }
-.conversation-coordinates button { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 4px 6px; border: 1px solid #d5dfdc; border-radius: 5px; color: #64736e; background: rgba(255,255,255,.92); cursor: pointer; font: 9px/1 "Cascadia Code", Consolas, monospace; }
-.conversation-coordinates button:hover { color: var(--primary); border-color: #8dbab2; }
-.conversation-coordinates svg { width: 11px; }
+.message-list { position: relative; min-height: 0; overflow-y: auto; padding: 34px clamp(28px, 5vw, 72px) 20px; }
+.conversation-coordinates { position: sticky; z-index: 8; top: 50%; float: right; display: flex; flex-direction: column; align-items: flex-end; width: 56px; margin-right: -54px; transform: translateY(-50%); }
+.conversation-coordinates button { position: relative; display: flex; align-items: center; justify-content: flex-end; width: 52px; height: 24px; padding: 0 7px; border: 0; color: #dfe7e4; background: transparent; cursor: pointer; }
+.coordinate-tick { display: block; width: 18px; height: 3px; border-radius: 3px; background: var(--coordinate-color); opacity: var(--coordinate-opacity); transform: scaleX(var(--coordinate-scale)); transform-origin: right center; transition: transform 220ms cubic-bezier(.2,.8,.2,1), background-color 220ms ease, opacity 220ms ease, box-shadow 220ms ease; }
+.conversation-coordinates button:hover .coordinate-tick, .conversation-coordinates button:focus-visible .coordinate-tick { box-shadow: 0 0 10px rgba(79, 140, 255, .28); }
+.coordinate-tooltip { position: absolute; top: 50%; right: 52px; display: block; overflow: hidden; max-width: min(320px, 34vw); padding: 8px 10px; border: 1px solid #d5dfdc; border-radius: 7px; color: #e7eeeb; background: #151b1a; box-shadow: 0 10px 28px rgba(18, 31, 27, .18); opacity: 0; pointer-events: none; transform: translate(8px, -50%); transition: opacity 160ms ease, transform 200ms cubic-bezier(.2,.8,.2,1); white-space: nowrap; text-overflow: ellipsis; font-size: 11px; }
+.coordinate-tooltip strong { margin-right: 7px; color: #72a4ff; font: 700 9px/1 "Cascadia Code", Consolas, monospace; }
+.conversation-coordinates button:hover .coordinate-tooltip, .conversation-coordinates button:focus-visible .coordinate-tooltip { opacity: 1; transform: translate(0, -50%); }
 .empty-state { display: grid; place-items: center; align-content: center; min-height: 100%; text-align: center; }
 .empty-state h1 { margin: 0; color: #17231f; font-size: 29px; font-weight: 700; }
 .empty-state p { max-width: 520px; margin: 10px 0 0; color: #7a8883; font-size: 12px; }
@@ -1420,6 +1546,19 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
 .preset-row.active { background: #edf7f4; }
 .preset-row strong, .preset-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preset-row small { color: #81908a; font-size: 10px; }
+.hoya-context-menu { position: fixed; z-index: 5000; width: 232px; padding: 6px; border: 1px solid #d3ddda; border-radius: 7px; background: rgba(255, 255, 255, .98); box-shadow: 0 14px 36px rgba(19, 34, 29, .18); backdrop-filter: blur(12px); }
+.hoya-context-menu > button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 36px; padding: 7px 9px; border: 0; border-radius: 5px; color: #34423e; background: transparent; cursor: pointer; text-align: left; font-size: 11px; }
+.hoya-context-menu > button:hover, .hoya-context-menu > button:focus-visible { color: #123d36; background: #e7f0ed; }
+.hoya-context-menu > button.danger { color: #a8403a; }
+.hoya-context-menu > button.danger:hover { background: #f9e5e3; }
+.hoya-context-menu > button svg { flex: 0 0 auto; width: 15px; }
+.context-menu-separator { display: block; height: 1px; margin: 5px 4px; background: #e3e9e7; }
+.context-color-section { padding: 6px 9px 8px; }
+.context-color-section small { display: block; margin-bottom: 6px; color: #7b8984; font-size: 9px; }
+.context-color-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.context-color-grid button { display: grid; place-items: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+.context-color-grid button:hover, .context-color-grid button:focus-visible { background: #e8efec; }
+.context-color-grid span { width: 12px; height: 12px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(20, 35, 30, .12); }
 .settings-dialog :deep(.el-dialog__body) { padding-top: 8px; }
 .settings-tabs :deep(.el-tabs__content) { min-height: 410px; }
 .settings-section { padding: 18px 0; border-bottom: 1px solid var(--border); }
@@ -1446,6 +1585,152 @@ body.resizing-row, body.resizing-row * { cursor: row-resize !important; user-sel
 .feedback-intro p { margin: 7px 0 0; color: #697772; font-size: 11px; line-height: 1.5; }
 .feedback-intro > :deep(.el-button) { position: absolute; top: 4px; right: 0; }
 .settings-tabs :deep(.el-form) { margin-top: 18px; }
+
+/* Codex-inspired dark workbench */
+.hoya-shell { border-color: #37393e; border-radius: 12px; background: #111213; box-shadow: 0 18px 56px rgba(0, 0, 0, .42); }
+.sidebar { grid-template-rows: 72px minmax(0, 1fr) auto; border-right: 0; background: #191b20; }
+.brand { gap: 10px; padding: 14px 18px; border-color: #303239; background: #191b20; }
+.brand-icon { width: 34px; height: 34px; border-radius: 8px; }
+.brand-line strong { color: #f2f3f4; font-size: 16px; }
+.brand-copy small { color: #858991; }
+.sidebar-scroll { padding: 12px 10px 24px; scrollbar-color: #44474e transparent; }
+.nav-section { gap: 4px; padding-bottom: 14px; }
+.nav-section + .nav-section { padding-top: 12px; border-color: #2c2f35; }
+.section-heading { min-height: 34px; padding-inline: 10px; color: #858991; font-size: 12px; }
+.section-heading :deep(.el-button.active) { color: #d9dadd; background: #30333a; }
+.project-actions { gap: 6px; padding-bottom: 4px; }
+.project-actions :deep(.el-button) { min-height: 38px; border-color: #34373d; color: #d6d8db; background: #202227; }
+.project-actions :deep(.el-button:hover) { border-color: #4b4f57; background: #292c32; }
+.project-row { min-height: 44px; border-radius: 8px; color: #d3d5d8; }
+.project-row:hover, .tool-row:hover { background: #252830; }
+.project-row.active { color: #f5f6f7; background: #2d313a; box-shadow: none; }
+.project-row small { display: none; }
+.project-main { min-height: 44px; color: inherit; }
+.project-row :deep(.el-button), .task-row :deep(.el-button) { color: #93979e; }
+.project-task-list { margin-left: 18px; border-left-color: #383b42; }
+.project-new-task, .project-task { color: #aeb1b7; }
+.project-new-task:hover, .project-task:hover { color: #f0f1f2; background: #24272d; }
+.project-task.active { color: #f4f5f6; background: #2d313a; }
+.project-empty { color: #6f737b; }
+.new-task-button { min-height: 42px; border: 1px solid #383b42; border-radius: 8px; color: #f3f4f5; background: #22252b; }
+.new-task-button:hover { border-color: #4b4f57; background: #2b2e35; }
+.task-row { border-radius: 8px; }
+.task-row:hover { background: #252830; }
+.task-row.active { background: #2d313a; }
+.task-title { color: #c4c7cc; }
+.task-row.active .task-title { color: #fff; }
+.tool-row { border-radius: 8px; color: #b5b8bd; }
+.tool-row.active { color: #f3f4f5; background: #2d313a; box-shadow: none; }
+.sidebar-update { border-color: #33534d; color: #8fd0c3; background: #20302e; }
+.sidebar-status { border-color: #303239; background: #17191d; }
+.sidebar-status small, .workspace-path { color: #7f838a; }
+.status-pill { color: #ff9b8f; background: #3b2626; }
+.status-pill.ready { color: #79ccb9; background: #203630; }
+.resize-handle::after { background: #303239; }
+.resize-handle:hover::after { background: #6faaa0; box-shadow: none; }
+
+.main-column { background: #111213; }
+.topbar { padding-left: 20px; border-color: #303236; background: #151617; }
+.topbar-title { display: flex; align-items: center; gap: 10px; }
+.topbar-title > svg { width: 18px; color: #c7c9cc; }
+.topbar-title > span { display: grid; }
+.topbar-title small { color: #777b82; font-size: 9px; font-weight: 650; text-transform: uppercase; }
+.topbar-title strong { color: #f3f4f5; font-size: 14px; }
+.top-actions > :deep(.el-button) { color: #aeb1b7; }
+.top-actions > :deep(.el-button:hover) { color: #fff; background: #292b2f; }
+.top-actions > :deep(.el-button.active) { color: #dff5f0; background: #2b3b38; }
+.top-actions > :deep(.el-button.open-location) { width: auto; min-width: 112px; padding-inline: 14px; border: 1px solid #383a3f; color: #e6e7e9; background: #202123; }
+.top-actions > :deep(.el-button.open-location:hover) { border-color: #4a4d53; background: #292a2d; }
+.run-state { color: #ff9b8f; background: #3b2626; }
+.run-state.ready { color: #79ccb9; background: #203630; }
+.run-state.busy { color: #f0b66e; background: #3b3020; }
+.language-select :deep(.el-select__wrapper) { color: #c6c8cc; background: transparent; }
+.window-control { color: #b7bac0 !important; }
+.window-control:hover { background: #292b2f !important; }
+.window-control.close:hover { background: #c42b1c !important; }
+
+.chat-pane { background: #121313; }
+.message-list { padding: 38px clamp(32px, 7vw, 116px) 24px; scrollbar-color: #3a3c40 transparent; }
+.empty-state h1 { color: #f3f4f5; font-size: 28px; }
+.empty-state p { color: #85888d; }
+.workspace-selector { color: #c5c7ca; }
+.workspace-selector:hover { color: #fff; background: #242628; }
+.message { width: min(900px, 100%); margin-bottom: 30px; color: #e7e8ea; }
+.message.user { width: min(760px, 90%); padding: 14px 16px; border: 1px solid #35373b; border-radius: 12px; background: #202123; }
+.message-head { color: #8e9197; }
+.message-head img { border-radius: 6px; }
+.message pre { color: #e8e9eb; font-size: 14px; line-height: 1.72; }
+.message.system, .message.error { border-color: #36383d; background: #1b1c1e; }
+.message.error { color: #ffaaa1; background: #322020; }
+.message-actions :deep(.el-button) { color: #8c9096; }
+.message-actions :deep(.el-button:hover) { color: #f2f3f4; background: #292b2e; }
+.reasoning-panel { border-color: #303236; color: #a3a6ac; background: #18191a; }
+.reasoning-panel summary { color: #aeb1b7; }
+.code-run-row { border-color: #323439; background: #18191a; }
+.code-output, .history { background: #0d0e0f !important; }
+.conversation-coordinates { border-color: #34363a; }
+.coordinate-tick { background: #5d6066; }
+
+.composer { width: min(900px, calc(100% - 48px)); margin-bottom: 20px; padding: 12px 14px 10px; border: 1px solid #3a3c40; border-radius: 16px; background: #292a2c; box-shadow: 0 18px 46px rgba(0, 0, 0, .34); }
+.composer :deep(.el-textarea__inner) { min-height: 84px !important; padding: 6px 4px 12px; border: 0; border-radius: 0; color: #f1f2f3; background: transparent; box-shadow: none; }
+.composer :deep(.el-textarea__inner:focus) { border: 0; box-shadow: none; }
+.composer :deep(.el-textarea__inner::placeholder) { color: #777a80; }
+.composer-controls { gap: 8px; margin-top: 0; }
+.composer-controls :deep(.el-button) { border-radius: 9px; }
+.composer-controls :deep(.el-button.is-text) { color: #aeb1b7; }
+.composer-controls :deep(.el-button--primary) { color: #17201e; background: #d9e8e5; border-color: #d9e8e5; }
+.composer-controls :deep(.el-button--danger) { color: #fff; }
+.composer-controls :deep(.el-radio-button__inner) { border-color: #3b3d42; color: #aaadb2; background: #222326; box-shadow: none; }
+.composer-controls :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) { color: #eff8f6; background: #344a45; border-color: #4f796f; box-shadow: none; }
+.composer-editing { border-color: #4c7169; color: #9bd0c5; background: #23332f; }
+.access-mode { display: inline-flex; align-items: center; gap: 5px; min-height: 32px; color: #f28c45; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.access-mode svg { width: 14px; }
+.model-select { width: 190px; margin-left: auto; }
+.model-select :deep(.el-select__wrapper) { border: 0; color: #d5d7da; background: #222326; box-shadow: inset 0 0 0 1px #3a3c40; }
+
+.workbench { background: #131414; }
+.workbench-tabs { border-color: #303236; background: #191a1b; }
+.workbench-tabs button { color: #989ba1; }
+.workbench-tabs button:hover { color: #e7e8e9; background: #252628; }
+.workbench-tabs button.active { color: #fff; background: #2a2b2d; box-shadow: inset 0 0 0 1px #393b3f; }
+.workbench-tabs :deep(.el-button) { color: #9fa2a7; }
+
+.inspector { border-color: #303236; background: #171818; }
+.inspector-title { border-color: #303236; }
+.inspector-title span { color: #777b82; }
+.inspector-title strong { color: #f1f2f3; }
+.inspector :deep(.el-tabs__nav-wrap::after) { background: #303236; }
+.inspector :deep(.el-tabs__item) { color: #93969c; }
+.inspector :deep(.el-tabs__item.is-active) { color: #e9eaea; }
+.inspector-scroll { scrollbar-color: #3b3d42 transparent; }
+.environment-card, .run-card, .approval-card, .search-result, .memory-item { margin-bottom: 12px; padding: 14px; border: 1px solid #36383c; border-radius: 12px; background: #222325; }
+.environment-heading, .environment-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.environment-heading { padding-bottom: 10px; color: #e5e6e8; }
+.environment-row { min-height: 38px; border-top: 1px solid #323438; color: #aeb1b6; font-size: 11px; }
+.environment-row strong { overflow: hidden; max-width: 68%; color: #e1e2e4; text-overflow: ellipsis; white-space: nowrap; }
+.run-card > p, .search-result p, .memory-item p { color: #a6a9ae; }
+.change-row { border-color: #34363a; }
+.change-row > span { color: #72c8a7; }
+.activity-row strong { color: #d7d9dc; }
+.activity-row small, .search-result small { color: #7f838a; }
+.activity-row pre, .approval-card pre { background: #0e0f10; }
+.search-result strong { color: #e1e2e4; }
+.preset-row.active { background: #26332f; }
+.preset-heading, .preset-row small { color: #92969c; }
+.hoya-context-menu { border-color: #3b3d42; background: rgba(37, 38, 41, .98); box-shadow: 0 18px 42px rgba(0, 0, 0, .42); }
+.hoya-context-menu > button { color: #d6d8db; }
+.hoya-context-menu > button:hover, .hoya-context-menu > button:focus-visible { color: #fff; background: #33353a; }
+.hoya-context-menu > button.danger { color: #ff9e95; }
+.hoya-context-menu > button.danger:hover { background: #442827; }
+.context-menu-separator { background: #3b3d42; }
+.context-color-section small { color: #94979d; }
+.context-color-grid button:hover, .context-color-grid button:focus-visible { background: #34363a; }
+.settings-section, .preset-list, .feedback-intro { border-color: #34363a; }
+.settings-row small, .repository-section small, .feedback-intro small { color: #8e9298; }
+.settings-row strong, .repository-section strong, .feedback-intro strong { color: #eceef0; }
+.repository-section span, .feedback-intro p { color: #a0a3a8; }
+.update-status { border-color: #383a3f; color: #b9bcc1; background: #222326; }
+.update-status.available { border-color: #41665e; color: #8ed2c3; background: #20312d; }
 @media (max-width: 1180px) {
   .hoya-shell, .hoya-shell.inspector-open { grid-template-columns: var(--sidebar-width) 5px minmax(0, 1fr); }
   .inspector { position: fixed; z-index: 50; top: 0; right: 0; bottom: 0; width: var(--inspector-width); box-shadow: -18px 0 44px rgba(26,33,44,.16); }

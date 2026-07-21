@@ -303,7 +303,7 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             self.write_json({"ok": False, "error": "workspace is required"}, HTTPStatus.BAD_REQUEST)
             return
         self.state.reload(Path(workspace))
-        self.user_settings_store().remember_project(Path(workspace))
+        self.user_settings_store().select_project(Path(workspace))
         self.write_json(self.state.status_payload())
 
     def handle_get_config(self) -> None:
@@ -398,7 +398,7 @@ class HoyaRequestHandler(BaseHTTPRequestHandler):
             self.write_json({"ok": False, "error": "project directory does not exist"}, HTTPStatus.BAD_REQUEST)
             return
         self.state.reload(project_path)
-        project = self.user_settings_store().remember_project(project_path)
+        project = self.user_settings_store().select_project(project_path)
         self.write_json({"ok": True, "project": project, "status": self.state.status_payload()})
 
     def handle_update_project(self) -> None:

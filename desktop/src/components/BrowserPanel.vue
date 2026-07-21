@@ -97,24 +97,24 @@ onMounted(() => nextTick(() => addressInput.value?.focus()))
 </template>
 
 <style scoped>
-.browser-panel { display: grid; grid-template-rows: 48px 28px minmax(0, 1fr); height: 100%; min-height: 0; background: #edf1ef; }
+.browser-panel { display: grid; grid-template-rows: 48px 28px minmax(0, 1fr); height: 100%; min-height: 0; color: #e6e7e9; background: #121313; }
 .browser-toolbar, .browser-navigation, .browser-meta { display: flex; align-items: center; }
-.browser-toolbar { gap: 6px; padding: 6px 10px; border-bottom: 1px solid #d5ddda; background: #f9fbfa; }
+.browser-toolbar { gap: 6px; padding: 6px 10px; border-bottom: 1px solid #303236; background: #191a1b; }
 .browser-navigation { gap: 2px; }
 .browser-toolbar :deep(.el-button) { min-width: 36px; }
 .address-input { min-width: 180px; flex: 1; }
-.address-input :deep(.el-input__wrapper) { border-radius: 6px; box-shadow: 0 0 0 1px #d5ddda inset; }
-.browser-meta { gap: 10px; min-width: 0; padding: 0 14px; color: #71807b; background: #f4f7f5; font-size: 10px; }
-.browser-meta strong { color: #3a4743; font-size: 11px; }
+.address-input :deep(.el-input__wrapper) { border-radius: 8px; color: #e8e9eb; background: #222326; box-shadow: 0 0 0 1px #3a3c40 inset; }
+.browser-meta { gap: 10px; min-width: 0; padding: 0 14px; color: #858990; background: #171818; font-size: 10px; }
+.browser-meta strong { color: #d8dade; font-size: 11px; }
 .browser-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.preview-stage { min-height: 0; overflow: auto; padding: 12px; }
-.preview-frame { height: 100%; min-height: 260px; margin: 0 auto; overflow: hidden; border: 1px solid #cbd6d2; border-radius: 7px; background: #fff; box-shadow: 0 8px 24px rgba(23, 44, 38, .08); transition: width 180ms ease; }
+.preview-stage { min-height: 0; overflow: auto; padding: 12px; background: #121313; }
+.preview-frame { height: 100%; min-height: 260px; margin: 0 auto; overflow: hidden; border: 1px solid #383a3f; border-radius: 10px; background: #fff; box-shadow: 0 12px 30px rgba(0, 0, 0, .28); transition: width 180ms ease; }
 .preview-frame.desktop { width: 100%; }
 .preview-frame.tablet { width: min(820px, 100%); }
 .preview-frame.mobile { width: min(390px, 100%); }
 webview { display: flex; width: 100%; height: 100%; }
-.browser-empty { display: grid; place-items: center; align-content: center; gap: 8px; height: 100%; color: #7a8984; text-align: center; }
+.browser-empty { display: grid; place-items: center; align-content: center; gap: 8px; height: 100%; color: #858990; background: #1b1c1e; text-align: center; }
 .browser-empty svg { width: 28px; color: #0f766e; }
-.browser-empty strong { color: #27332f; font-size: 14px; }
+.browser-empty strong { color: #e5e7e9; font-size: 14px; }
 .browser-empty span { font-size: 11px; }
 </style>

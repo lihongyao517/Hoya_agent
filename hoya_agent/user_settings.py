@@ -83,6 +83,22 @@ class UserSettingsStore:
         self.save(data)
         return selected
 
+    def select_project(self, project_path: Path) -> dict[str, Any]:
+        data = self.load()
+        resolved = project_path.expanduser().resolve()
+        normalized_path = os.path.normcase(str(resolved))
+        projects = self.list_projects(include_archived=True)
+        selected = next(
+            (project for project in projects if os.path.normcase(str(project.get("path", ""))) == normalized_path),
+            None,
+        )
+        if selected is None:
+            return self.remember_project(resolved)
+        data["projects"] = projects
+        data["last_workspace"] = str(resolved)
+        self.save(data)
+        return selected
+
     def update_project(
         self,
         project_id: str,
