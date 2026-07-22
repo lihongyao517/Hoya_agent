@@ -121,17 +121,17 @@ onBeforeUnmount(() => {
 .terminal-input-row :deep(.el-input__inner) { color: #eef5f2; font-family: "Cascadia Code", Consolas, monospace; }
 .terminal-input-row :deep(.el-input__wrapper.is-focus) { border-color: #2aa896; box-shadow: 0 0 0 2px rgba(45, 212, 191, .12); }
 .panel-toolbar :deep(.el-button) { min-width: 40px; color: #aab7b2; }
-:global(html[data-theme='light']) .terminal-panel { color: #303237; background: #fafafa; }
-:global(html[data-theme='light']) .panel-toolbar,
-:global(html[data-theme='light']) .terminal-input-row { border-color: #d6d7da; background: #eeeeef; }
-:global(html[data-theme='light']) .terminal-context small { color: #74777d; }
-:global(html[data-theme='light']) .terminal-output { scrollbar-color: #bfc1c6 transparent; }
-:global(html[data-theme='light']) .terminal-output .command { color: #4d5055; }
-:global(html[data-theme='light']) .terminal-output .stdout { color: #303237; }
-:global(html[data-theme='light']) .terminal-output .stderr { color: #55585e; }
-:global(html[data-theme='light']) .terminal-output .system { color: #74777d; }
-:global(html[data-theme='light']) .terminal-input-row :deep(.el-input__wrapper) { border-color: #d1d2d6; background: #ffffff; }
-:global(html[data-theme='light']) .terminal-input-row :deep(.el-input__inner) { color: #292b2f; }
-:global(html[data-theme='light']) .terminal-dot { background: #777a80; }
-:global(html[data-theme='light']) .terminal-prompt { color: #55585e; }
+html[data-theme='light'] .terminal-panel { color: #303237; background: #fafafa; }
+html[data-theme='light'] .panel-toolbar,
+html[data-theme='light'] .terminal-input-row { border-color: #d6d7da; background: #eeeeef; }
+html[data-theme='light'] .terminal-context small { color: #74777d; }
+html[data-theme='light'] .terminal-output { scrollbar-color: #bfc1c6 transparent; }
+html[data-theme='light'] .terminal-output .command { color: #4d5055; }
+html[data-theme='light'] .terminal-output .stdout { color: #303237; }
+html[data-theme='light'] .terminal-output .stderr { color: #55585e; }
+html[data-theme='light'] .terminal-output .system { color: #74777d; }
+html[data-theme='light'] .terminal-input-row :deep(.el-input__wrapper) { border-color: #d1d2d6; background: #ffffff; }
+html[data-theme='light'] .terminal-input-row :deep(.el-input__inner) { color: #292b2f; }
+html[data-theme='light'] .terminal-dot { background: #19a474; }
+html[data-theme='light'] .terminal-prompt { color: #16875f; }
 </style>

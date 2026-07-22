@@ -1,22 +1,37 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import subprocess
 import tempfile
+import threading
 import unittest
 import urllib.error
+import urllib.request
 from unittest.mock import patch
 from pathlib import Path
 
 from hoya_agent.agent import HoyaAgent
-from hoya_agent.config import ANTHROPIC_DEFAULT_BASE_URL, Config, validate_api_config_update
+from hoya_agent.config import ANTHROPIC_DEFAULT_BASE_URL, Config, validate_api_config_update, write_dotenv_values
 from hoya_agent.conversations import ConversationStore
 from hoya_agent.llm import LLMClient, connection_error_message, urlopen_with_ollama_retry
 from hoya_agent.memory import MemoryStore
 from hoya_agent.model_discovery import discover_models
 from hoya_agent.run_state import ChangeStore, RunStore
-from hoya_agent.server import AgentServerState, public_model_payload
+from hoya_agent.server import AgentServerState, HoyaHTTPServer, HoyaRequestHandler, is_loopback_host, public_model_payload
+from hoya_agent.state_paths import migrate_workspace_state, workspace_config_path, workspace_state_dir
+from hoya_agent.tools import assess_shell_risk
 from hoya_agent.user_settings import UserSettingsStore
-from hoya_agent.workspace_ops import apply_pending_operation, build_index, search_index
+from hoya_agent.workspace_ops import (
+    HistoryStore,
+    apply_pending_operation,
+    build_index,
+    delete_pending_for_runs,
+    finalize_pending_operation,
+    load_pending_writes,
+    search_index,
+)
 
 
 class ConversationStoreTests(unittest.TestCase):
@@ -68,6 +83,14 @@ class ConversationStoreTests(unittest.TestCase):
             loaded = store.messages(conversation["id"])[0]
             self.assertEqual(loaded["meta"]["reasoning"], ["检查上下文", "验证结果"])
             self.assertEqual(loaded["meta"]["tool_results"][0]["name"], "read_file")
+
+    def test_conversation_ids_cannot_escape_the_message_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = ConversationStore(root / "conversations.json", root / "messages")
+
+            with self.assertRaises(ValueError):
+                store.messages("../outside")
 
 
 class ProjectSettingsTests(unittest.TestCase):
@@ -127,7 +150,7 @@ class ProjectSettingsTests(unittest.TestCase):
             self.assertEqual(selected["id"], first["id"])
             self.assertEqual(settings.load()["last_workspace"], str(first_path.resolve()))
 
-    def test_model_presets_keep_api_key_for_reopen(self) -> None:
+    def test_model_presets_never_persist_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"
             store = UserSettingsStore(path)
@@ -143,11 +166,26 @@ class ProjectSettingsTests(unittest.TestCase):
 
             reloaded = UserSettingsStore(path)
 
-            self.assertEqual(saved["api_key"], "sk-test-key")
-            self.assertEqual(reloaded.list_models()[0]["api_key"], "sk-test-key")
+            self.assertNotIn("api_key", saved)
+            self.assertNotIn("api_key", reloaded.list_models()[0])
+            self.assertNotIn("sk-test-key", path.read_text(encoding="utf-8"))
             public = public_model_payload(saved)
             self.assertNotIn("api_key", public)
             self.assertTrue(public["api_key_set"])
+
+    def test_legacy_model_secret_is_removed_during_load(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(
+                json.dumps({"models": [{"id": "model-1", "api_key": "legacy-secret"}]}),
+                encoding="utf-8",
+            )
+
+            loaded = UserSettingsStore(path).load()
+
+            self.assertNotIn("api_key", loaded["models"][0])
+            self.assertTrue(loaded["models"][0]["api_key_set"])
+            self.assertNotIn("legacy-secret", path.read_text(encoding="utf-8"))
 
 
 class ApiConfigurationTests(unittest.TestCase):
@@ -166,6 +204,379 @@ class ApiConfigurationTests(unittest.TestCase):
         self.assertEqual(errors, {})
         self.assertEqual(updates["HOYA_BASE_URL"], ANTHROPIC_DEFAULT_BASE_URL)
         self.assertEqual(updates["HOYA_WIRE_API"], "messages")
+
+    def test_first_install_keeps_backend_state_available(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                state = AgentServerState(workspace)
+
+            status = state.status_payload()
+            self.assertTrue(status["ok"])
+            self.assertTrue(status["backend_ok"])
+            self.assertFalse(status["configured"])
+            self.assertIsNotNone(state.require_agent())
+
+    def test_workspace_state_and_nonsecret_config_leave_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            legacy_state = workspace / ".hoya"
+            legacy_state.mkdir(parents=True)
+            (legacy_state / "memory.json").write_text('[{"text":"remember"}]', encoding="utf-8")
+            (workspace / ".env").write_text(
+                "HOYA_LLM_PROVIDER=openai-compatible\n"
+                "HOYA_API_KEY=legacy-project-secret\n"
+                "HOYA_BASE_URL=https://relay.example.com/v1\n"
+                "HOYA_MODEL=gpt-test\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                config = Config.from_env(workspace, reload_dotenv=True, session_api_key="session-secret")
+                private_config = workspace_config_path(workspace)
+
+            self.assertTrue(config.configured)
+            self.assertEqual(config.api_key, "session-secret")
+            self.assertTrue(config.memory_path.is_relative_to(root / "data"))
+            self.assertFalse(legacy_state.joinpath("memory.json").exists())
+            self.assertNotIn("HOYA_API_KEY", private_config.read_text(encoding="utf-8"))
+            self.assertIn("HOYA_MODEL=gpt-test", private_config.read_text(encoding="utf-8"))
+
+    def test_legacy_state_is_copied_out_when_move_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            legacy = workspace / ".hoya_memory.json"
+            legacy.write_text('[{"text":"remember"}]', encoding="utf-8")
+
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                with patch("hoya_agent.state_paths.shutil.move", side_effect=OSError("locked")):
+                    migrated = migrate_workspace_state(workspace, "memory.json", ".hoya_memory.json")
+
+            self.assertTrue(migrated.is_relative_to(root / "data"))
+            self.assertEqual(migrated.read_text(encoding="utf-8"), '[{"text":"remember"}]')
+            self.assertFalse(legacy.exists())
+
+    def test_split_legacy_state_is_merged_without_overwriting_current_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            legacy = workspace / ".hoya_memory.json"
+            legacy.write_text('[{"id":"old"},{"id":"same","value":"legacy"}]', encoding="utf-8")
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                current = workspace_state_dir(workspace) / "memory.json"
+                current.write_text('[{"id":"same","value":"current"}]', encoding="utf-8")
+                migrated = migrate_workspace_state(workspace, "memory.json", ".hoya_memory.json")
+
+            self.assertEqual(
+                json.loads(migrated.read_text(encoding="utf-8")),
+                [{"id": "old"}, {"id": "same", "value": "current"}],
+            )
+            self.assertFalse(legacy.exists())
+
+    def test_legacy_state_leaf_symlink_is_not_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            external = root / "external.json"
+            external.write_text('[{"text":"outside"}]', encoding="utf-8")
+            try:
+                os.symlink(external, workspace / ".hoya_memory.json")
+            except OSError as exc:
+                self.skipTest(f"symlinks are unavailable: {exc}")
+
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                migrated = migrate_workspace_state(workspace, "memory.json", ".hoya_memory.json")
+
+            self.assertFalse(migrated.exists())
+            self.assertEqual(external.read_text(encoding="utf-8"), '[{"text":"outside"}]')
+
+    def test_legacy_state_parent_directory_symlink_is_not_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            external = root / "external"
+            external.mkdir()
+            (external / "history.jsonl").write_text('{"outside":true}\n', encoding="utf-8")
+            try:
+                os.symlink(external, workspace / ".hoya", target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                migrated = migrate_workspace_state(workspace, "history.jsonl", ".hoya/history.jsonl")
+
+            self.assertFalse(migrated.exists())
+            self.assertTrue((external / "history.jsonl").exists())
+
+    def test_legacy_state_tree_with_hard_link_is_not_migrated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            legacy = workspace / ".hoya_conversations"
+            legacy.mkdir(parents=True)
+            external = root / "external.jsonl"
+            external.write_text('{"outside":true}\n', encoding="utf-8")
+            os.link(external, legacy / "linked.jsonl")
+
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                migrated = migrate_workspace_state(workspace, "conversations", ".hoya_conversations")
+
+            self.assertFalse(migrated.exists())
+            self.assertTrue(legacy.exists())
+            self.assertEqual(external.read_text(encoding="utf-8"), '{"outside":true}\n')
+
+    def test_config_update_is_rejected_before_disk_write_while_run_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                state = AgentServerState(workspace)
+                config_path = workspace_config_path(workspace)
+                original = config_path.read_bytes() if config_path.exists() else None
+                state.begin_run("active-run")
+                try:
+                    with self.assertRaises(RuntimeError):
+                        state.update_config({"HOYA_LLM_PROVIDER": "ollama"})
+                finally:
+                    state.finish_run("active-run")
+
+            self.assertEqual(config_path.read_bytes() if config_path.exists() else None, original)
+
+    def test_failed_config_reload_restores_file_and_live_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                state = AgentServerState(workspace)
+                old_agent = state.agent
+                old_config = state.config
+                old_error = state.error
+                old_session_api_key = state.session_api_key
+                config_path = workspace_config_path(workspace)
+                original = config_path.read_bytes() if config_path.exists() else None
+                with patch("hoya_agent.server.HoyaAgent", side_effect=RuntimeError("reload failed")):
+                    with self.assertRaises(RuntimeError):
+                        state.update_config({"HOYA_LLM_PROVIDER": "ollama"}, session_api_key="new-secret")
+
+            self.assertIs(state.agent, old_agent)
+            self.assertIs(state.config, old_config)
+            self.assertEqual(state.error, old_error)
+            self.assertEqual(state.session_api_key, old_session_api_key)
+            self.assertEqual(config_path.read_bytes() if config_path.exists() else None, original)
+
+    def test_permission_settings_are_persisted_and_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                path = workspace_config_path(workspace)
+                write_dotenv_values(
+                    path,
+                    {
+                        "HOYA_LLM_PROVIDER": "ollama",
+                        "HOYA_PERMISSION_MODE": "strict",
+                        "HOYA_ALLOW_SHELL": "1",
+                        "HOYA_ALLOW_DESKTOP": "1",
+                        "HOYA_REQUIRE_WRITE_APPROVAL": "1",
+                        "HOYA_REQUIRE_SHELL_APPROVAL": "1",
+                    },
+                )
+                config = Config.from_env(workspace, reload_dotenv=True)
+
+            self.assertEqual(config.permission_mode, "strict")
+            self.assertTrue(config.allow_shell)
+            self.assertTrue(config.allow_desktop)
+            self.assertTrue(config.require_write_approval)
+            self.assertTrue(config.require_shell_approval)
+
+    def test_api_key_can_be_cleared_without_persisting_a_placeholder(self) -> None:
+        updates, errors = validate_api_config_update(
+            {
+                "provider": "openai-compatible",
+                "clear_api_key": True,
+                "base_url": "https://relay.example.com/v1",
+                "model": "gpt-test",
+                "wire_api": "chat",
+            },
+            {"HOYA_API_KEY": "old-session-secret"},
+        )
+
+        self.assertEqual(errors, {})
+        self.assertEqual(updates["HOYA_API_KEY"], "")
+
+
+class ServerSecurityTests(unittest.TestCase):
+    def test_only_loopback_bind_addresses_are_recognized_without_a_token(self) -> None:
+        self.assertTrue(is_loopback_host("127.0.0.1"))
+        self.assertTrue(is_loopback_host("::1"))
+        self.assertTrue(is_loopback_host("localhost"))
+        self.assertFalse(is_loopback_host("0.0.0.0"))
+
+    def test_tokenless_server_rejects_browser_origins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                server = HoyaHTTPServer(("127.0.0.1", 0), HoyaRequestHandler)
+                server.state = AgentServerState(workspace)
+                server.auth_token = ""
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                url = f"http://127.0.0.1:{server.server_address[1]}/api/health"
+                try:
+                    with urllib.request.urlopen(url, timeout=2) as response:
+                        self.assertTrue(json.loads(response.read())["ok"])
+                    request = urllib.request.Request(url, headers={"Origin": "null"})
+                    with self.assertRaises(urllib.error.HTTPError) as unauthorized:
+                        urllib.request.urlopen(request, timeout=2)
+                    self.assertEqual(unauthorized.exception.code, 401)
+                    unauthorized.exception.close()
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+    def test_server_requires_bearer_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                server = HoyaHTTPServer(("127.0.0.1", 0), HoyaRequestHandler)
+                server.state = AgentServerState(workspace)
+                server.auth_token = "test-server-token"
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                url = f"http://127.0.0.1:{server.server_address[1]}/api/health"
+                try:
+                    with self.assertRaises(urllib.error.HTTPError) as unauthorized:
+                        urllib.request.urlopen(url, timeout=2)
+                    self.assertEqual(unauthorized.exception.code, 401)
+                    unauthorized.exception.close()
+
+                    request = urllib.request.Request(
+                        url,
+                        headers={"Authorization": "Bearer test-server-token"},
+                    )
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        self.assertEqual(json.loads(response.read())["ok"], True)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+    def test_config_endpoint_keeps_api_key_in_memory_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                server = HoyaHTTPServer(("127.0.0.1", 0), HoyaRequestHandler)
+                server.state = AgentServerState(workspace)
+                server.auth_token = "test-server-token"
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                payload = json.dumps(
+                    {
+                        "provider": "openai-compatible",
+                        "api_key": "session-only-secret",
+                        "base_url": "https://relay.example.com/v1",
+                        "model": "gpt-test",
+                        "wire_api": "chat",
+                    }
+                ).encode()
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/api/config",
+                    data=payload,
+                    method="POST",
+                    headers={
+                        "Authorization": "Bearer test-server-token",
+                        "Content-Type": "application/json",
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        self.assertTrue(json.loads(response.read())["configured"])
+                    self.assertEqual(server.state.session_api_key, "session-only-secret")
+                    config_text = workspace_config_path(workspace).read_text(encoding="utf-8")
+                    self.assertNotIn("session-only-secret", config_text)
+                    self.assertFalse((workspace / ".env").exists())
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+    def test_server_rejects_oversized_json_before_reading_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                server = HoyaHTTPServer(("127.0.0.1", 0), HoyaRequestHandler)
+                server.state = AgentServerState(workspace)
+                server.auth_token = "test-server-token"
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/api/config",
+                    data=b"{}",
+                    method="POST",
+                    headers={
+                        "Authorization": "Bearer test-server-token",
+                        "Content-Type": "application/json",
+                        "Content-Length": str(2 * 1024 * 1024 + 1),
+                    },
+                )
+                try:
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(request, timeout=2)
+                    self.assertEqual(error.exception.code, 413)
+                    error.exception.close()
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+    def test_server_query_limits_are_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                server = HoyaHTTPServer(("127.0.0.1", 0), HoyaRequestHandler)
+                server.state = AgentServerState(workspace)
+                server.auth_token = "test-server-token"
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/api/runs?limit=-1000",
+                    headers={"Authorization": "Bearer test-server-token"},
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=2) as response:
+                        self.assertTrue(json.loads(response.read())["ok"])
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+
+
+class ToolSecurityTests(unittest.TestCase):
+    def test_shell_risk_detection_handles_aliases_and_spacing(self) -> None:
+        for command in ["rm\tsecret.txt", "REG ADD HKCU\\Demo", "Invoke-RestMethod https://example.test"]:
+            risk = assess_shell_risk(command)
+            self.assertEqual(risk["level"], "high")
+            self.assertFalse(risk["allowed"])
 
 
 class LLMClientTests(unittest.TestCase):
@@ -458,6 +869,82 @@ class ChangeStoreTests(unittest.TestCase):
             self.assertTrue(rollback["conflict"])
             self.assertEqual(target.read_text(encoding="utf-8"), "newer user edit")
 
+    def test_concurrent_writes_form_a_linear_version_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "notes.txt"
+            target.write_text("original", encoding="utf-8")
+            stores = [self.make_store(root), self.make_store(root)]
+            barrier = threading.Barrier(3)
+            failures: list[Exception] = []
+
+            def write(store: ChangeStore, content: str) -> None:
+                try:
+                    barrier.wait()
+                    store.write_text("notes.txt", content)
+                except Exception as exc:  # pragma: no cover - asserted below
+                    failures.append(exc)
+
+            threads = [
+                threading.Thread(target=write, args=(store, content))
+                for store, content in zip(stores, ("first", "second"), strict=True)
+            ]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join(timeout=2)
+
+            entries = stores[0]._load()
+            self.assertEqual(failures, [])
+            self.assertEqual(len(entries), 2)
+            self.assertEqual(entries[0]["before_sha256"], hashlib.sha256(b"original").hexdigest())
+            self.assertEqual(entries[1]["before_sha256"], entries[0]["after_sha256"])
+            self.assertEqual(
+                entries[1]["after_sha256"],
+                hashlib.sha256(target.read_text(encoding="utf-8").encode()).hexdigest(),
+            )
+
+    def test_run_and_version_indexes_do_not_silently_drop_old_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs = RunStore(root / "runs.json")
+            for index in range(205):
+                runs.create(f"run-{index}", "conversation", f"Task {index}")
+            changes = self.make_store(root)
+            versions = [{"id": f"version-{index}"} for index in range(505)]
+            changes._save(versions)
+
+            self.assertEqual(len(runs._load()), 205)
+            self.assertEqual(len(changes._load()), 505)
+
+    def test_conversation_cleanup_removes_runs_and_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runs = RunStore(root / "runs.json")
+            changes = self.make_store(root)
+            history = HistoryStore(root / "history.jsonl")
+            pending_path = root / "pending.json"
+            runs.create("run-1", "conversation-1", "Edit file")
+            result = changes.write_text("notes.txt", "updated", "run-1")
+            history.append("user", "Edit file", {"conversation_id": "conversation-1", "run_id": "run-1"})
+            pending_path.write_text(json.dumps([{"id": "pending-1", "run_id": "run-1"}]), encoding="utf-8")
+
+            run_ids = runs.delete_conversation("conversation-1")
+            deleted_versions = changes.delete_runs(run_ids)
+            deleted_history = history.delete_conversation("conversation-1")
+            deleted_pending = delete_pending_for_runs(pending_path, run_ids)
+
+            self.assertEqual(run_ids, ["run-1"])
+            self.assertEqual(deleted_versions, 1)
+            self.assertEqual(deleted_history, 1)
+            self.assertEqual(deleted_pending, 1)
+            self.assertEqual(runs.list("conversation-1"), [])
+            self.assertEqual(changes.list("run-1"), [])
+            self.assertEqual(history.recent(), [])
+            self.assertEqual(json.loads(pending_path.read_text(encoding="utf-8")), [])
+            self.assertFalse((root / ".hoya" / "versions" / f"{result['version_id']}.before").exists())
+
 
 class RelevantContextTests(unittest.TestCase):
     def test_memory_recall_prefers_task_relevance_over_recency(self) -> None:
@@ -471,6 +958,47 @@ class RelevantContextTests(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertIn("pytest", result[0]["text"])
 
+    def test_memory_writes_are_atomic_across_store_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.json"
+            errors: list[Exception] = []
+
+            def add_entry(index: int) -> None:
+                try:
+                    MemoryStore(path).add(f"memory-{index}")
+                except Exception as exc:  # pragma: no cover - assertion reports worker failures
+                    errors.append(exc)
+
+            workers = [threading.Thread(target=add_entry, args=(index,)) for index in range(24)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=5)
+
+            entries = MemoryStore(path).load()
+            self.assertEqual(errors, [])
+            self.assertEqual(len(entries), 24)
+            self.assertEqual(len({entry["id"] for entry in entries}), 24)
+
+    def test_legacy_memory_delete_removes_only_one_matching_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.json"
+            created_at = "2026-07-22T18:00:00"
+            path.write_text(
+                json.dumps(
+                    [
+                        {"created_at": created_at, "text": "first"},
+                        {"created_at": created_at, "text": "second"},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            removed = MemoryStore(path).delete(created_at)
+
+            self.assertTrue(removed)
+            self.assertEqual([entry["text"] for entry in MemoryStore(path).load()], ["second"])
+
     def test_workspace_index_matches_chinese_subphrases(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -483,6 +1011,131 @@ class RelevantContextTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["results"][0]["path"], "workflow.md")
+
+    def test_sensitive_files_are_not_read_or_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".env").write_text(
+                "HOYA_LLM_PROVIDER=ollama\nHOYA_API_KEY=must-not-leak\n",
+                encoding="utf-8",
+            )
+            (root / "notes.md").write_text("safe content", encoding="utf-8")
+            (root / ".git").mkdir()
+            (root / ".git" / "config").write_text("credential=must-not-leak", encoding="utf-8")
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                agent = HoyaAgent(Config.from_env(root, reload_dotenv=True))
+                read_result = agent.tools["read_file"].handler({"path": ".env"})
+                git_result = agent.tools["read_file"].handler({"path": ".git/config"})
+                index = build_index(root, agent.config.index_path)
+
+            self.assertIn("blocked", read_result["error"])
+            self.assertIn("blocked", git_result["error"])
+            indexed_paths = {item["path"] for item in index["files"]}
+            self.assertNotIn(".env", indexed_paths)
+            self.assertIn("notes.md", indexed_paths)
+
+    def test_hard_link_to_sensitive_file_is_not_read_or_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            secret = root / ".env"
+            alias = root / "notes.txt"
+            secret.write_text("HOYA_API_KEY=must-not-leak", encoding="utf-8")
+            try:
+                os.link(secret, alias)
+            except OSError as exc:
+                self.skipTest(f"hard links are unavailable: {exc}")
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                agent = HoyaAgent(Config.from_env(root, reload_dotenv=True))
+                read_result = agent.tools["read_file"].handler({"path": "notes.txt"})
+                index = build_index(root, agent.config.index_path)
+
+            self.assertIn("blocked", read_result["error"])
+            self.assertNotIn("notes.txt", {item["path"] for item in index["files"]})
+
+    def test_desktop_write_requires_approval_outside_yolo_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".env").write_text(
+                "HOYA_LLM_PROVIDER=ollama\n"
+                "HOYA_ALLOW_DESKTOP=1\n"
+                "HOYA_PERMISSION_MODE=risk\n",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"HOYA_DATA_DIR": str(root / "data")}, clear=False):
+                agent = HoyaAgent(Config.from_env(root, reload_dotenv=True))
+                result = agent.tools["write_desktop_file"].handler(
+                    {"file_name": "hoya-approval-test.txt", "content": "pending"}
+                )
+
+            self.assertTrue(result["pending"])
+            self.assertEqual(result["risk"]["level"], "high")
+            self.assertEqual(len(json.loads(agent.config.pending_writes_path.read_text(encoding="utf-8"))), 1)
+
+
+class PendingOperationTests(unittest.TestCase):
+    def test_sensitive_target_is_rechecked_when_approval_is_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / ".env"
+            target.write_text("original", encoding="utf-8")
+            pending_path = root / "pending.json"
+            pending_path.write_text(
+                json.dumps([{"id": "pending-1", "operation": "write_file", "path": ".env", "content": "changed"}]),
+                encoding="utf-8",
+            )
+
+            result = apply_pending_operation(root, pending_path, "pending-1")
+
+            self.assertFalse(result["ok"])
+            self.assertIn("sensitive", result["error"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+            self.assertEqual(load_pending_writes(pending_path)[0]["status"], "pending")
+
+    def test_unknown_shell_outcome_is_retained_and_never_retried_automatically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pending_path = root / "pending.json"
+            pending_path.write_text(
+                json.dumps(
+                    [{"id": "shell-1", "operation": "run_powershell", "command": "Set-Content result.txt done"}]
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"PRIVATE_API_KEY": "must-not-leak"}, clear=False):
+                with patch(
+                    "hoya_agent.workspace_ops.subprocess.run",
+                    side_effect=subprocess.TimeoutExpired("powershell", 1),
+                ) as run:
+                    first = apply_pending_operation(root, pending_path, "shell-1", allow_shell=True)
+                    second = apply_pending_operation(root, pending_path, "shell-1", allow_shell=True)
+
+            self.assertTrue(first["outcome_unknown"])
+            self.assertTrue(second["outcome_unknown"])
+            self.assertEqual(run.call_count, 1)
+            self.assertNotIn("PRIVATE_API_KEY", run.call_args.kwargs["env"])
+            self.assertEqual(load_pending_writes(pending_path)[0]["status"], "outcome_unknown")
+
+    def test_applied_operation_is_replayed_without_repeating_the_side_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pending_path = root / "pending.json"
+            pending_path.write_text(
+                json.dumps(
+                    [{"id": "write-1", "operation": "write_file", "path": "result.txt", "content": "approved"}]
+                ),
+                encoding="utf-8",
+            )
+
+            first = apply_pending_operation(root, pending_path, "write-1")
+            (root / "result.txt").write_text("changed-after-apply", encoding="utf-8")
+            second = apply_pending_operation(root, pending_path, "write-1")
+
+            self.assertTrue(first["consumed"])
+            self.assertTrue(second["replayed"])
+            self.assertEqual((root / "result.txt").read_text(encoding="utf-8"), "changed-after-apply")
+            self.assertEqual(load_pending_writes(pending_path)[0]["status"], "applied")
+            self.assertTrue(finalize_pending_operation(pending_path, "write-1"))
+            self.assertEqual(load_pending_writes(pending_path), [])
 
 
 if __name__ == "__main__":

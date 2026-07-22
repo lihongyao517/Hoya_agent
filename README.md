@@ -24,7 +24,7 @@ Hoya Agent 当前更适合作为“本地工作区任务助手”MVP：让模型
 | 终端部分 | `hoya_agent/terminal/` | 轻量 CLI 与 Textual TUI，只负责终端交互和事件展示 |
 | 桌面客户端 | `desktop/` | Electron 主进程、Vue + Element Plus 界面、工作区与会话管理 |
 
-终端和桌面客户端复用同一个 `HoyaAgent`、配置文件与 `.hoya/` 工作区状态，不各自复制业务逻辑。
+终端和桌面客户端复用同一个 `HoyaAgent` 与工作区状态，不各自复制业务逻辑。运行状态默认保存在当前用户的 `%APPDATA%\Hoya Agent\workspaces\<工作区标识>\`，不会继续向项目写入 `.hoya/` 私有数据。
 
 ## 功能
 
@@ -180,7 +180,7 @@ npm install
 npm run dev
 ```
 
-Electron 主进程会自动启动 `python -m hoya_agent --server`，Vue 前端通过 `http://127.0.0.1:8787` 调用 Agent。
+Electron 主进程会在 `127.0.0.1` 的随机空闲端口启动 `python -m hoya_agent --server`，并为每次启动生成独立访问令牌。端口和令牌只通过 Electron preload 暴露给当前窗口。
 
 ### 构建 Windows 客户端
 
@@ -192,17 +192,29 @@ npm run dist:full
 
 `npm run dist:full` 会先构建 Python 后端，再通过 electron-builder 生成 Windows 安装包和 portable 程序。产物统一写入 `artifacts/desktop/`，安装包和便携版分别使用 `Hoya-Agent-Setup-*` 与 `Hoya-Agent-Portable-*` 文件名。
 
-Windows 无感更新使用 `electron-updater` 和 NSIS 安装版。客户端启动后会在后台检查 GitHub Release；发现新版本后静默下载，下载完成后可立即重启安装，也会在用户正常退出时自动安装。portable 程序只作为免安装备用版本，不支持 Electron 自动更新。
+Windows 无感更新使用 `electron-updater`、GitHub Releases 和 NSIS 安装版。客户端启动后会在后台检查更新；仅当远端版本高于当前版本时显示更新入口并静默下载，下载完成后可立即重启安装，也会在用户正常退出时自动安装。Portable 程序只作为免安装备用版本，不支持自动更新。
 
-发布新版本时需要先设置具备仓库 Release 权限的 `GH_TOKEN`，再执行：
+本地构建并校验同一批更新产物：
 
 ```powershell
 cd desktop
-$env:GH_TOKEN='你的 GitHub Token'
-npm run release:github
+npm run release:prepare
 ```
 
-发布命令会把 NSIS 安装包、blockmap 和 `latest.yml` 一起上传到 GitHub Release。三者必须来自同一次构建，否则客户端无法验证或下载更新。
+这个命令只在本机生成并校验安装包，不会上传。正式发布由 GitHub Actions 完成：提交版本改动后创建与 `desktop/package.json` 完全一致的标签（例如 `v1.2.2`）并推送该标签。工作流会重新测试、构建，再把 NSIS 安装包、blockmap、Portable 程序和 `latest.yml` 作为同一个不可覆盖的 GitHub Release 发布。
+
+```powershell
+git tag v1.2.2
+git push github v1.2.2
+```
+
+### 下载、安装与自动更新测试
+
+1. 打开 [GitHub Releases](https://github.com/lihongyao517/Hoya_agent/releases)，下载 `Hoya-Agent-Setup-<版本>-x64.exe`。不要用 `Portable` 测试自动更新。
+2. 运行安装程序并启动 Hoya Agent。安装版默认创建桌面和开始菜单快捷方式。
+3. 当前发行包未配置代码签名，Windows SmartScreen 可能要求确认；只应从本仓库 Releases 下载并核对文件名。
+4. 要测试无感更新，先安装一个较旧的 Setup 版本，再发布更高版本。客户端会静默下载，退出应用或点击“立即重启安装”后完成替换。
+5. 版本相同或远端版本更低时不会显示更新提醒，也不会重复下载。
 
 桌面客户端支持：
 
@@ -336,21 +348,22 @@ HOYA_QQ_SEND_STATUS=1
 
 当需求比较模糊时，Agent 应先用产品经理方式收敛问题：明确目标用户、成功标准、输入输出、风险边界和最小可交付结果。复杂任务应先给出简短计划，再读取文件、写入文件或运行检查。
 
-CLI、TUI 和桌面端都会写入：
+CLI、TUI 和桌面端的私有状态默认写入 `%APPDATA%\Hoya Agent\workspaces\<工作区标识>\`：
 
 | 文件 | 说明 |
 | --- | --- |
-| `.hoya/history.jsonl` | 用户输入和模型回复历史 |
-| `.hoya/runs.jsonl` | 任务开始、结束、错误和工具调用事件 |
-| `.hoya/task_runs.json` | 持久化任务计划、上下文摘要、审批检查点和 Run 状态 |
-| `.hoya/versions.json`、`.hoya/versions/` | 局部文件版本元数据和回滚快照 |
-| `.hoya/memory.json` | 长期记忆 |
-| `.hoya/index.json` | 工作区轻量索引 |
-| `.hoya/pending_writes.json` | 待审批写入队列 |
-| `.hoya/conversations.json`、`.hoya/conversations/` | 桌面端、CLI 和 TUI 的会话数据 |
-| `imports/` | `/import` 导入的文件或目录 |
+| `history.jsonl` | 用户输入和模型回复历史 |
+| `runs.jsonl` | 任务开始、结束、错误和工具调用事件 |
+| `task_runs.json` | 持久化任务计划、上下文摘要、审批检查点和 Run 状态 |
+| `versions.json`、`versions/` | 局部文件版本元数据和回滚快照 |
+| `memory.json` | 长期记忆 |
+| `index.json` | 工作区轻量索引 |
+| `pending_writes.json` | 待审批操作及执行状态 |
+| `conversations.json`、`conversations/` | 桌面端、CLI 和 TUI 的会话数据 |
 
-旧版本放在工作区根目录的 `.hoya_*` 文件和会话目录会在首次启动时自动迁移到 `.hoya/`。
+`/import` 导入的用户文件仍放在工作区的 `imports/` 目录中，因为它们属于项目内容而不是应用私有状态。
+
+旧版本位于项目 `.hoya/` 或根目录 `.hoya_*` 的状态会在首次启动时迁移到用户数据目录；检测到符号链接、Windows 联接点或工作区外路径时会拒绝自动迁移。
 
 Agent 每轮任务会按当前请求的相关性选择会话历史和长期记忆；如果工作区索引存在，还会注入得分最高的文件导航片段。对于“继续”“刚才那个文件”“上一句提到的问题”等明确跟进请求，则保留最近对话顺序。Run 面板会展示本轮实际复用的上下文摘要。可用 `HOYA_HISTORY_CONTEXT_LIMIT` 控制最多注入多少条历史，用 `HOYA_HISTORY_ENTRY_MAX_CHARS` 控制每条历史最多注入多少字符，避免上下文过长导致成本、延迟或跑题。工具结果回填模型前也会按 `HOYA_TOOL_RESULT_MAX_CHARS` 截断。
 
@@ -532,7 +545,6 @@ Hoya_agent/
 ├── local_ai_study_assistant/   # 独立 RAG 学习助手
 ├── artifacts/                  # 本地构建产物（Git 忽略）
 ├── archive/                    # 本地历史文件归档（Git 忽略）
-├── .hoya/                      # 本地运行状态（Git 忽略）
 ├── build_backend.ps1           # Python 后端打包脚本
 ├── .env.example
 ├── requirements.txt
@@ -565,7 +577,7 @@ npm run build:renderer
 
 ### 提示缺少 `HOYA_API_KEY` / `HOYA_BASE_URL` / `HOYA_MODEL`
 
-OpenAI-compatible 和 Anthropic 模式都需要填写 API key、base URL 和 model。Anthropic 模式还需要设置 `HOYA_LLM_PROVIDER=anthropic`，接口类型会固定为 `messages`。请复制 `.env.example` 为 `.env`，并填写必需变量。
+OpenAI-compatible 和 Anthropic 模式都需要填写 API key、base URL 和 model。桌面端请直接在“设置 > 模型连接”中保存；API Key 由 Electron `safeStorage` 加密保存，不写入项目配置文件。CLI/TUI 用户可以复制 `.env.example` 为 `.env` 并填写变量。Anthropic 模式还需要设置 `HOYA_LLM_PROVIDER=anthropic`，接口类型会固定为 `messages`。
 
 如果你使用 Ollama，请设置：
 
@@ -639,5 +651,3 @@ python -m pip install -r requirements.txt
 - 本项目使用 [MIT License](LICENSE)。
 - 数据处理与联网行为见 [隐私政策](PRIVACY.md)。
 - Windows 客户端通过 GitHub Releases 获取版本信息、更新元数据和安装包；检测到新版本后在后台下载，并在退出或用户确认后完成安装。
-- Windows 代码签名正在申请 SignPath Foundation 免费开源证书；批准前的过渡版本暂未签名，流程见 [代码签名政策](CODE_SIGNING_POLICY.md)。
-- Code signing is planned with [SignPath.io](https://signpath.io/) and a certificate from the [SignPath Foundation](https://signpath.org/).

@@ -79,12 +79,20 @@ class QQBridgeConfig:
             raise ValueError("Missing HOYA_QQ_ONEBOT_API_URL. Example: http://127.0.0.1:3000")
         if max_message_chars <= 0:
             raise ValueError("HOYA_QQ_MAX_MESSAGE_CHARS must be positive.")
+        if max_message_chars > 20000:
+            raise ValueError("HOYA_QQ_MAX_MESSAGE_CHARS must not exceed 20000.")
         if reply_chunk_chars <= 0:
             raise ValueError("HOYA_QQ_REPLY_CHUNK_CHARS must be positive.")
+        if reply_chunk_chars > 4000:
+            raise ValueError("HOYA_QQ_REPLY_CHUNK_CHARS must not exceed 4000.")
         if queue_size <= 0:
             raise ValueError("HOYA_QQ_QUEUE_SIZE must be positive.")
+        if queue_size > 50:
+            raise ValueError("HOYA_QQ_QUEUE_SIZE must not exceed 50.")
         if request_timeout <= 0:
             raise ValueError("HOYA_QQ_REQUEST_TIMEOUT must be positive.")
+        if request_timeout > 120:
+            raise ValueError("HOYA_QQ_REQUEST_TIMEOUT must not exceed 120 seconds.")
 
         return cls(
             host=host,
@@ -326,7 +334,12 @@ class QQBridgeHandler(BaseHTTPRequestHandler):
 
 
 def read_json(handler: BaseHTTPRequestHandler, max_message_chars: int) -> dict[str, Any]:
-    length = int(handler.headers.get("Content-Length", "0"))
+    try:
+        length = int(handler.headers.get("Content-Length", "0"))
+    except ValueError as exc:
+        raise ValueError("Content-Length must be an integer") from exc
+    if length < 0:
+        raise ValueError("Content-Length must not be negative")
     max_body = max(65536, max_message_chars * 4 + 4096)
     if length > max_body:
         raise ValueError("request body too large")

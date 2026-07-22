@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import mimetypes
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from assistant.agent_tool import (
     AgentRequestError,
@@ -37,21 +38,58 @@ llm_client = LLMClient(settings)
 payment_verifier = create_payment_verifier(settings)
 
 
+class RequestBodyError(ValueError):
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
     handler.wfile.write(body)
 
 
 def read_json(handler: BaseHTTPRequestHandler) -> dict:
-    length = int(handler.headers.get("Content-Length", "0"))
+    raw_length = handler.headers.get("Content-Length", "0")
+    try:
+        length = int(raw_length)
+    except ValueError as exc:
+        raise RequestBodyError("Content-Length 必须是整数") from exc
+    if length < 0:
+        raise RequestBodyError("Content-Length 不能为负数")
+    if length > settings.max_request_bytes:
+        raise RequestBodyError("请求体过大", 413)
     raw = handler.rfile.read(length)
     if not raw:
         return {}
     return json.loads(raw.decode("utf-8"))
+
+
+def safe_web_path(root: Path, relative_url_path: str) -> Path | None:
+    decoded = unquote(relative_url_path).replace("\\", "/")
+    parts = [part for part in decoded.split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        return None
+    candidate = (root / Path(*parts)).resolve()
+    resolved_root = root.resolve()
+    if candidate != resolved_root and resolved_root not in candidate.parents:
+        return None
+    return candidate
+
+
+def decode_upload_content(encoded: str, max_bytes: int) -> bytes:
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise RequestBodyError("文件内容不是有效的 base64") from exc
+    if len(content) > max_bytes:
+        raise RequestBodyError("上传文件过大", 413)
+    return content
 
 
 def safe_filename(name: str) -> str:
@@ -65,7 +103,7 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self.serve_file(WEB_DIR / "index.html")
+            self.serve_file(WEB_DIR, "index.html")
             return
         if parsed.path == "/api/documents":
             json_response(self, {"documents": knowledge_base.list_documents()})
@@ -74,7 +112,7 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
             self.agent_schema()
             return
         if parsed.path.startswith("/static/"):
-            self.serve_file(WEB_DIR / parsed.path.lstrip("/"))
+            self.serve_file(WEB_DIR, parsed.path.lstrip("/"))
             return
         self.send_error(404, "Not found")
 
@@ -96,6 +134,9 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             json_response(self, {"error": "请求 JSON 格式不正确"}, 400)
             return
+        except RequestBodyError as exc:
+            json_response(self, {"error": str(exc)}, exc.status)
+            return
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
             return
@@ -111,7 +152,12 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
 
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         file_path = UPLOAD_DIR / filename
-        file_path.write_bytes(base64.b64decode(encoded))
+        try:
+            content = decode_upload_content(encoded, settings.max_upload_bytes)
+        except RequestBodyError as exc:
+            json_response(self, {"error": str(exc)}, exc.status)
+            return
+        file_path.write_bytes(content)
 
         try:
             text = load_document_text(file_path)
@@ -253,7 +299,11 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
             rebuilt += 1
         json_response(self, {"message": f"已重建 {rebuilt} 个文档"})
 
-    def serve_file(self, file_path: Path) -> None:
+    def serve_file(self, root: Path, relative_url_path: str) -> None:
+        file_path = safe_web_path(root, relative_url_path)
+        if file_path is None:
+            self.send_error(404, "Not found")
+            return
         if not file_path.exists() or not file_path.is_file():
             self.send_error(404, "Not found")
             return
@@ -262,6 +312,7 @@ class StudyAssistantHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(body)
 

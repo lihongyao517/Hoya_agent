@@ -1,18 +1,24 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Tray, shell } = require('electron')
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, session, shell, Tray } = require('electron')
+const crypto = require('node:crypto')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn } = require('node:child_process')
 const { autoUpdater } = require('electron-updater')
-const { RELEASES_URL, checkForUpdates: checkTagsForUpdates } = require('./update-service.cjs')
+const { RELEASES_URL, checkForUpdates: checkTagsForUpdates, compareVersions } = require('./update-service.cjs')
 
 const isDev = !app.isPackaged
 if (process.platform === 'win32') app.setAppUserModelId('com.hoya.agent.desktop')
 const serverHost = '127.0.0.1'
-const serverPort = process.env.HOYA_SERVER_PORT || '8787'
+const backendReadyPrefix = 'HOYA_SERVER_READY '
+const backendStartTimeoutMs = 30000
+const previewPartition = 'hoya-preview'
 const supportedLanguages = new Set(['zh-CN', 'en-US'])
 const windows = new Set()
 let currentLanguage = 'zh-CN'
 let backend = null
+let backendConnection = null
+let backendStartPromise = null
+let backendRestartTimer = null
 let mainWindow = null
 let tray = null
 let isQuitting = false
@@ -23,36 +29,7 @@ let backgroundUpdateTimer = null
 let updateInstallInProgress = false
 const terminalRuns = new Map()
 const approvedWorkspacePaths = new Set()
-
-function applyDwmCornerPreference(win) {
-  if (process.platform !== 'win32' || win.isDestroyed()) return
-
-  const handle = win.getNativeWindowHandle()
-  const handleValue = handle.length >= 8 ? handle.readBigUInt64LE(0).toString() : handle.readUInt32LE(0).toString()
-  const command = [
-    '$ErrorActionPreference = "Stop"',
-    'Add-Type @\'',
-    'using System;',
-    'using System.Runtime.InteropServices;',
-    'public static class HoyaDwm {',
-    '  [DllImport("dwmapi.dll")]',
-    '  public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);',
-    '}',
-    '\'@',
-    `$hwnd = [IntPtr]([UInt64]${handleValue})`,
-    '$cornerPreference = 2',
-    '[HoyaDwm]::DwmSetWindowAttribute($hwnd, 33, [ref]$cornerPreference, 4) | Out-Null',
-  ].join('\n')
-
-  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', command], {
-    windowsHide: true,
-    stdio: 'ignore',
-  })
-  child.on('error', (error) => console.warn(`[hoya-desktop] failed to set DWM corner preference: ${error}`))
-  child.on('exit', (code) => {
-    if (code !== 0) console.warn(`[hoya-desktop] DWM corner preference exited with code ${code}`)
-  })
-}
+const lockedSessions = new WeakSet()
 
 function projectRoot() {
   return path.resolve(__dirname, '..', '..')
@@ -77,46 +54,230 @@ function readJsonFile(filePath) {
   }
 }
 
-function savedApiKey(workspace) {
-  const resolved = path.resolve(String(workspace || ''))
-  const settings = readJsonFile(pythonSettingsPath())
-  const projectPaths = Array.isArray(settings.projects) ? settings.projects.map((item) => item?.path).filter(Boolean) : []
-  const allowed = [initialWorkspace(), settings.last_workspace, ...projectPaths]
-    .filter(Boolean)
-    .some((item) => path.resolve(String(item)).toLowerCase() === resolved.toLowerCase())
-  if (!allowed) return ''
+function writeJsonFileAtomic(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
   try {
-    const lines = fs.readFileSync(path.join(resolved, '.env'), 'utf8').split(/\r?\n/)
-    const line = lines.find((item) => /^\s*(?:export\s+)?HOYA_API_KEY\s*=/.test(item))
-    if (!line) return ''
-    return line.slice(line.indexOf('=') + 1).trim().replace(/^['"]|['"]$/g, '')
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+    fs.renameSync(temporaryPath, filePath)
+  } finally {
+    try { fs.unlinkSync(temporaryPath) } catch { /* The rename already consumed the temporary file. */ }
+  }
+}
+
+function normalizedPath(value) {
+  const resolved = path.resolve(String(value || ''))
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+function existingDirectory(value) {
+  if (!value) return ''
+  try {
+    const resolved = path.resolve(String(value))
+    return fs.statSync(resolved).isDirectory() ? resolved : ''
   } catch {
     return ''
   }
 }
 
+function scratchWorkspace() {
+  const workspace = path.join(app.getPath('userData'), 'workspaces', 'scratch')
+  fs.mkdirSync(workspace, { recursive: true })
+  return workspace
+}
+
 function initialWorkspace() {
-  if (process.env.HOYA_WORKSPACE) return process.env.HOYA_WORKSPACE
+  const configuredWorkspace = existingDirectory(process.env.HOYA_WORKSPACE)
+  if (configuredWorkspace) return configuredWorkspace
   const settings = readJsonFile(pythonSettingsPath())
-  if (settings.last_workspace) return settings.last_workspace
-  return isDev ? projectRoot() : app.getPath('home')
+  const previousWorkspace = existingDirectory(settings.last_workspace)
+  if (previousWorkspace && normalizedPath(previousWorkspace) !== normalizedPath(app.getPath('home'))) {
+    return previousWorkspace
+  }
+  return scratchWorkspace()
 }
 
 function rememberWorkspace(workspace) {
-  if (!workspace) return
-  approvedWorkspacePaths.add(path.resolve(String(workspace)).toLowerCase())
+  const resolved = existingDirectory(workspace)
+  if (resolved) approvedWorkspacePaths.add(normalizedPath(resolved))
 }
 
 function knownWorkspaceRoots() {
   const settings = readJsonFile(pythonSettingsPath())
-  const paths = [initialWorkspace(), settings.last_workspace, ...(Array.isArray(settings.projects) ? settings.projects.map((item) => item?.path) : [])]
+  const paths = [initialWorkspace(), ...(Array.isArray(settings.projects) ? settings.projects.map((item) => item?.path) : [])]
   for (const workspace of paths) rememberWorkspace(workspace)
   return [...approvedWorkspacePaths]
 }
 
+function isApprovedWorkspace(workspace) {
+  if (!workspace) return false
+  const candidate = normalizedPath(workspace)
+  return knownWorkspaceRoots().some((root) => candidate === root)
+}
+
+function credentialsPath() {
+  return path.join(app.getPath('userData'), 'credentials.json')
+}
+
+function normalizeCredentialDescriptor(payload = {}) {
+  const provider = String(payload.provider || '').trim().toLowerCase()
+  const rawBaseUrl = String(payload.baseUrl || payload.base_url || '').trim()
+  let baseUrl = rawBaseUrl.replace(/\/+$/, '')
+  try {
+    baseUrl = new URL(rawBaseUrl).toString().replace(/\/+$/, '')
+  } catch { /* Configuration validation reports malformed provider URLs. */ }
+  if (!provider || !baseUrl) return null
+  return { provider, baseUrl }
+}
+
+function credentialId(descriptor) {
+  return crypto.createHash('sha256')
+    .update(`${descriptor.provider}\0${descriptor.baseUrl}`)
+    .digest('hex')
+}
+
+function loadCredentials() {
+  const document = readJsonFile(credentialsPath())
+  return {
+    version: 1,
+    entries: document && typeof document.entries === 'object' && !Array.isArray(document.entries)
+      ? document.entries
+      : {},
+  }
+}
+
+function requireCredentialEncryption() {
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('Secure credential storage is unavailable on this system.')
+  }
+}
+
+function saveApiKey(payload = {}) {
+  const descriptor = normalizeCredentialDescriptor(payload)
+  if (!descriptor) throw new Error('Provider and base URL are required to save an API key.')
+  const apiKey = String(payload.apiKey || payload.api_key || '').trim()
+  if (!apiKey) return deleteApiKey(descriptor)
+  requireCredentialEncryption()
+  const document = loadCredentials()
+  document.entries[credentialId(descriptor)] = {
+    ...descriptor,
+    encrypted: safeStorage.encryptString(apiKey).toString('base64'),
+    updatedAt: new Date().toISOString(),
+  }
+  writeJsonFileAtomic(credentialsPath(), document)
+  return true
+}
+
+function deleteApiKey(payload = {}) {
+  const descriptor = normalizeCredentialDescriptor(payload)
+  if (!descriptor) throw new Error('Provider and base URL are required to delete an API key.')
+  const document = loadCredentials()
+  const id = credentialId(descriptor)
+  if (!Object.hasOwn(document.entries, id)) return false
+  delete document.entries[id]
+  writeJsonFileAtomic(credentialsPath(), document)
+  return true
+}
+
+function parseEnvValue(content, name) {
+  const expression = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=`, 'm')
+  const line = String(content || '').split(/\r?\n/).find((item) => expression.test(item))
+  if (!line) return ''
+  return line.slice(line.indexOf('=') + 1).trim().replace(/^(['"])(.*)\1$/, '$2')
+}
+
+function legacyCredential(workspace, requestedDescriptor) {
+  if (!isApprovedWorkspace(workspace)) return null
+  const envPath = path.join(path.resolve(workspace), '.env')
+  let content = ''
+  try {
+    content = fs.readFileSync(envPath, 'utf8')
+  } catch {
+    return null
+  }
+  const apiKey = parseEnvValue(content, 'HOYA_API_KEY')
+  if (!apiKey) return null
+  const descriptor = requestedDescriptor || normalizeCredentialDescriptor({
+    provider: parseEnvValue(content, 'HOYA_LLM_PROVIDER'),
+    baseUrl: parseEnvValue(content, 'HOYA_BASE_URL'),
+  })
+  if (!descriptor) return null
+  return { apiKey, content, descriptor, envPath }
+}
+
+function workspaceCredentialDescriptor(workspace) {
+  if (!isApprovedWorkspace(workspace)) return null
+  try {
+    const content = fs.readFileSync(path.join(path.resolve(workspace), '.env'), 'utf8')
+    return normalizeCredentialDescriptor({
+      provider: parseEnvValue(content, 'HOYA_LLM_PROVIDER'),
+      baseUrl: parseEnvValue(content, 'HOYA_BASE_URL'),
+    })
+  } catch {
+    return null
+  }
+}
+
+function removeLegacyApiKey(legacy) {
+  const newline = legacy.content.includes('\r\n') ? '\r\n' : '\n'
+  const lines = legacy.content.split(/\r?\n/)
+  const filtered = lines.filter((line) => !/^\s*(?:export\s+)?HOYA_API_KEY\s*=/.test(line))
+  const temporaryPath = `${legacy.envPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+  try {
+    fs.writeFileSync(temporaryPath, filtered.join(newline), 'utf8')
+    fs.renameSync(temporaryPath, legacy.envPath)
+  } finally {
+    try { fs.unlinkSync(temporaryPath) } catch { /* The rename already consumed the temporary file. */ }
+  }
+}
+
+function getApiKey(payload = {}) {
+  const requestedDescriptor = normalizeCredentialDescriptor(payload) || workspaceCredentialDescriptor(payload.workspace)
+  if (requestedDescriptor) {
+    const entry = loadCredentials().entries[credentialId(requestedDescriptor)]
+    if (entry?.encrypted) {
+      requireCredentialEncryption()
+      try {
+        return safeStorage.decryptString(Buffer.from(entry.encrypted, 'base64'))
+      } catch {
+        throw new Error('The saved API key could not be decrypted. Please save it again.')
+      }
+    }
+  }
+
+  const legacy = legacyCredential(payload.workspace, requestedDescriptor)
+  if (!legacy) return ''
+  saveApiKey({ ...legacy.descriptor, apiKey: legacy.apiKey })
+  removeLegacyApiKey(legacy)
+  return legacy.apiKey
+}
+
+function migrateLegacyModelCredentials() {
+  const settingsFile = pythonSettingsPath()
+  const settings = readJsonFile(settingsFile)
+  if (!Array.isArray(settings.models)) return 0
+  let migrated = 0
+  for (const model of settings.models) {
+    if (!model || typeof model !== 'object') continue
+    const apiKey = String(model.api_key || '').trim()
+    const descriptor = normalizeCredentialDescriptor(model)
+    if (!apiKey || !descriptor) continue
+    try {
+      saveApiKey({ ...descriptor, apiKey })
+      delete model.api_key
+      model.api_key_set = true
+      migrated += 1
+    } catch (error) {
+      console.warn(`[hoya-desktop] legacy model credential migration deferred: ${error}`)
+    }
+  }
+  if (migrated) writeJsonFileAtomic(settingsFile, settings)
+  return migrated
+}
+
 function terminalWorkingDirectory(value) {
   const resolved = path.resolve(String(value || ''))
-  const normalized = resolved.toLowerCase()
+  const normalized = normalizedPath(resolved)
   const allowed = knownWorkspaceRoots().some((root) => normalized === root || normalized.startsWith(`${root}${path.sep}`))
   if (!allowed || !fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
     throw new Error('Terminal directory is outside the approved workspaces.')
@@ -224,7 +385,7 @@ function resolveBackendCommand() {
   if (!isDev && fs.existsSync(bundled)) {
     return {
       command: bundled,
-      args: ['--host', serverHost, '--port', serverPort, '--workspace', workspace],
+      args: ['--host', serverHost, '--port', '0', '--workspace', workspace],
       cwd: path.dirname(bundled),
     }
   }
@@ -232,30 +393,34 @@ function resolveBackendCommand() {
   const root = projectRoot()
   return {
     command: process.env.HOYA_PYTHON || 'python',
-    args: ['-m', 'hoya_agent', '--server', '--host', serverHost, '--port', serverPort, '--workspace', workspace],
+    args: ['-m', 'hoya_agent', '--server', '--host', serverHost, '--port', '0', '--workspace', workspace],
     cwd: root,
   }
 }
 
 function settingsPath() {
+  return path.join(app.getPath('userData'), 'desktop-settings.json')
+}
+
+function legacyDesktopSettingsPath() {
   return path.join(app.getPath('userData'), 'settings.json')
 }
 
 function loadLanguage() {
   try {
-    const settings = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'))
+    const settings = {
+      ...readJsonFile(legacyDesktopSettingsPath()),
+      ...readJsonFile(settingsPath()),
+    }
     if (supportedLanguages.has(settings.language)) currentLanguage = settings.language
-  } catch {
-    currentLanguage = 'zh-CN'
-  }
+  } catch { currentLanguage = 'zh-CN' }
 }
 
 function saveLanguage(language) {
   try {
-    fs.mkdirSync(path.dirname(settingsPath()), { recursive: true })
     const settings = readJsonFile(settingsPath())
     settings.language = language
-    fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2), 'utf8')
+    writeJsonFileAtomic(settingsPath(), settings)
   } catch (error) {
     console.error(`[hoya-desktop] failed to save language: ${error}`)
   }
@@ -303,7 +468,17 @@ function createTray() {
   rebuildTrayMenu()
 }
 
+function lockDownSession(targetSession) {
+  if (!targetSession || lockedSessions.has(targetSession)) return
+  lockedSessions.add(targetSession)
+  targetSession.setPermissionCheckHandler(() => false)
+  targetSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false))
+  targetSession.on('will-download', (event) => event.preventDefault())
+}
+
 function createWindow() {
+  lockDownSession(session.defaultSession)
+  lockDownSession(session.fromPartition(previewPartition))
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -311,6 +486,7 @@ function createWindow() {
     minHeight: 640,
     frame: false,
     thickFrame: true,
+    roundedCorners: true,
     show: false,
     title: 'Hoya Agent',
     icon: path.join(__dirname, '..', 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
@@ -329,6 +505,11 @@ function createWindow() {
     webPreferences.nodeIntegration = false
     webPreferences.contextIsolation = true
     webPreferences.sandbox = true
+    webPreferences.webSecurity = true
+    webPreferences.allowRunningInsecureContent = false
+    webPreferences.partition = previewPartition
+    params.partition = previewPartition
+    delete params.allowpopups
     const source = String(params.src || 'about:blank')
     if (source === 'about:blank' || /^https?:\/\//i.test(source)) return
     if (source.startsWith('file://')) {
@@ -343,6 +524,7 @@ function createWindow() {
     event.preventDefault()
   })
   win.webContents.on('did-attach-webview', (_event, contents) => {
+    lockDownSession(contents.session)
     contents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(url)) shell.openExternal(url)
       return { action: 'deny' }
@@ -370,17 +552,13 @@ function createWindow() {
       win.webContents.send('hoya:window-maximized-changed', win.isMaximized())
     }
   }
-  const applyRoundedCorners = () => {
-    applyDwmCornerPreference(win)
-    sendMaximizedState()
-  }
-  win.on('maximize', applyRoundedCorners)
-  win.on('unmaximize', applyRoundedCorners)
-  win.on('restore', applyRoundedCorners)
+  win.on('maximize', sendMaximizedState)
+  win.on('unmaximize', sendMaximizedState)
+  win.on('restore', sendMaximizedState)
   win.on('resize', sendMaximizedState)
   win.once('ready-to-show', () => {
     win.show()
-    applyRoundedCorners()
+    sendMaximizedState()
   })
 
   if (isDev) {
@@ -397,10 +575,14 @@ function currentUpdateState() {
     currentVersion: app.getVersion(),
     latestVersion: '',
     updateAvailable: false,
-    autoUpdateSupported: app.isPackaged,
+    autoUpdateSupported: app.isPackaged && !isPortableBuild(),
     progress: 0,
     releasesUrl: RELEASES_URL,
   }
+}
+
+function isPortableBuild() {
+  return Boolean(process.env.PORTABLE_EXECUTABLE_FILE || process.env.PORTABLE_EXECUTABLE_DIR)
 }
 
 function publishUpdateState(patch) {
@@ -412,22 +594,36 @@ function publishUpdateState(patch) {
 }
 
 function configureAutoUpdater() {
-  if (!app.isPackaged) return
+  if (!app.isPackaged || isPortableBuild()) return
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
   autoUpdater.autoRunAppAfterInstall = true
   autoUpdater.allowPrerelease = false
 
   autoUpdater.on('checking-for-update', () => publishUpdateState({ ok: true, status: 'checking', error: undefined }))
-  autoUpdater.on('update-available', (info) => publishUpdateState({
-    ok: true,
-    status: 'downloading',
-    latestVersion: info.version || currentUpdateState().latestVersion,
-    updateAvailable: true,
-    autoUpdateSupported: true,
-    progress: 0,
-    error: undefined,
-  }))
+  autoUpdater.on('update-available', (info) => {
+    if (!info.version || compareVersions(info.version, app.getVersion()) <= 0) {
+      publishUpdateState({
+        ok: true,
+        status: 'not-available',
+        latestVersion: info.version || app.getVersion(),
+        updateAvailable: false,
+        autoUpdateSupported: true,
+        progress: 0,
+        error: undefined,
+      })
+      return
+    }
+    publishUpdateState({
+      ok: true,
+      status: 'downloading',
+      latestVersion: info.version,
+      updateAvailable: true,
+      autoUpdateSupported: true,
+      progress: 0,
+      error: undefined,
+    })
+  })
   autoUpdater.on('download-progress', (progress) => publishUpdateState({
     status: 'downloading',
     progress: Math.max(0, Math.min(100, Math.round(progress.percent || 0))),
@@ -474,6 +670,26 @@ async function checkDesktopUpdates() {
     if (!app.isPackaged) {
       return publishUpdateState({ ok: true, status: 'not-available', latestVersion: app.getVersion(), updateAvailable: false, autoUpdateSupported: false })
     }
+    if (isPortableBuild()) {
+      try {
+        const manual = await checkTagsForUpdates(app.getVersion())
+        return publishUpdateState({
+          ...manual,
+          status: manual.updateAvailable ? 'manual' : 'not-available',
+          autoUpdateSupported: false,
+          progress: 0,
+          error: undefined,
+        })
+      } catch (error) {
+        return publishUpdateState({
+          ok: false,
+          status: 'error',
+          updateAvailable: false,
+          autoUpdateSupported: false,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
     try {
       await autoUpdater.checkForUpdates()
       return currentUpdateState()
@@ -506,55 +722,182 @@ async function checkDesktopUpdates() {
 }
 
 function installDownloadedUpdate() {
-  if (currentUpdateState().status !== 'downloaded' || updateInstallInProgress) return false
+  if (isPortableBuild() || currentUpdateState().status !== 'downloaded' || updateInstallInProgress) return false
   updateInstallInProgress = true
   isQuitting = true
   stopBackgroundProcesses()
-  autoUpdater.quitAndInstall(false, true)
+  autoUpdater.quitAndInstall(true, true)
   return true
 }
 
 function stopBackgroundProcesses() {
   for (const { child } of terminalRuns.values()) child.kill()
   terminalRuns.clear()
+  backendConnection = null
+  if (backendRestartTimer) {
+    clearTimeout(backendRestartTimer)
+    backendRestartTimer = null
+  }
   if (backend) {
     backend.kill()
     backend = null
   }
 }
 
+function scheduleBackendRestart() {
+  if (isQuitting || backendRestartTimer) return
+  backendRestartTimer = setTimeout(() => {
+    backendRestartTimer = null
+    startBackend().catch((error) => {
+      console.error(`[hoya-desktop] backend restart failed: ${error.message}`)
+      scheduleBackendRestart()
+    })
+  }, 2000)
+  backendRestartTimer.unref?.()
+}
+
 function startBackend() {
-  if (backend) return
+  if (backendConnection) return Promise.resolve(backendConnection)
+  if (backendStartPromise) return backendStartPromise
+
   const backendCommand = resolveBackendCommand()
-  backend = spawn(backendCommand.command, backendCommand.args, {
-    cwd: backendCommand.cwd,
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
+  const token = crypto.randomBytes(32).toString('base64url')
+  let child = null
+  let stdoutBuffer = ''
+  let settled = false
+  let readyAccepted = false
+  let startupTimer = null
+
+  const startup = new Promise((resolve, reject) => {
+    const rejectStartup = (error) => {
+      if (settled) return
+      settled = true
+      if (startupTimer) clearTimeout(startupTimer)
+      reject(error instanceof Error ? error : new Error(String(error)))
+    }
+
+    const acceptReadyMessage = (line) => {
+      if (!line.startsWith(backendReadyPrefix)) {
+        if (line) console.log(`[hoya-server] ${line}`)
+        return
+      }
+      let ready = null
+      try {
+        ready = JSON.parse(line.slice(backendReadyPrefix.length))
+      } catch {
+        rejectStartup(new Error('Backend returned an invalid readiness message.'))
+        child?.kill()
+        return
+      }
+      const port = Number(ready?.port)
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        rejectStartup(new Error('Backend returned an invalid listening port.'))
+        child?.kill()
+        return
+      }
+      if (settled) return
+      settled = true
+      readyAccepted = true
+      if (startupTimer) clearTimeout(startupTimer)
+      backendConnection = { url: `http://${serverHost}:${port}`, token }
+      for (const win of windows) {
+        if (!win.isDestroyed()) win.webContents.send('hoya:server-connection-changed', backendConnection)
+      }
+      resolve(backendConnection)
+    }
+
+    try {
+      child = spawn(backendCommand.command, backendCommand.args, {
+        cwd: backendCommand.cwd,
+        env: {
+          ...process.env,
+          HOYA_SERVER_TOKEN: token,
+          PYTHONUNBUFFERED: '1',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+      backend = child
+    } catch (error) {
+      rejectStartup(new Error(`Backend could not be started: ${error instanceof Error ? error.message : error}`))
+      return
+    }
+
+    startupTimer = setTimeout(() => {
+      rejectStartup(new Error(`Backend did not become ready within ${backendStartTimeoutMs / 1000} seconds.`))
+      child.kill()
+    }, backendStartTimeoutMs)
+
+    child.stdout.on('data', (chunk) => {
+      stdoutBuffer += String(chunk)
+      const lines = stdoutBuffer.split(/\r?\n/)
+      stdoutBuffer = lines.pop() || ''
+      for (const line of lines) acceptReadyMessage(line.trim())
+    })
+    child.stderr.on('data', (chunk) => console.error(`[hoya-server] ${String(chunk).trim()}`))
+    child.on('error', (error) => {
+      rejectStartup(new Error(`Backend process failed: ${error.message}`))
+    })
+    child.on('exit', (code, signal) => {
+      if (backend === child) backend = null
+      backendConnection = null
+      if (!readyAccepted) {
+        rejectStartup(new Error(`Backend exited before it was ready (code ${code ?? 'none'}, signal ${signal || 'none'}).`))
+      } else {
+        console.log(`[hoya-server] exited with code ${code}`)
+        for (const win of windows) {
+          if (!win.isDestroyed()) win.webContents.send('hoya:server-connection-changed', null)
+        }
+      }
+      scheduleBackendRestart()
+    })
   })
 
-  backend.stdout.on('data', (chunk) => console.log(`[hoya-server] ${chunk}`.trim()))
-  backend.stderr.on('data', (chunk) => console.error(`[hoya-server] ${chunk}`.trim()))
-  backend.on('exit', (code) => {
-    console.log(`[hoya-server] exited with code ${code}`)
-    backend = null
-  })
+  backendStartPromise = startup
+  const clearStartup = () => {
+    if (backendStartPromise === startup) backendStartPromise = null
+  }
+  startup.then(clearStartup, clearStartup)
+  return startup
+}
+
+function serverConnection() {
+  return backendConnection ? Promise.resolve(backendConnection) : startBackend()
+}
+
+function browserTargetForExternal(value) {
+  const target = String(value || '')
+  if (/^https?:\/\//i.test(target)) return target
+  if (!/^mailto:lihongyao517@gmail\.com(?:\?|$)/i.test(target)) return ''
+  const message = new URL(target)
+  const compose = new URL('https://mail.google.com/mail/')
+  compose.searchParams.set('view', 'cm')
+  compose.searchParams.set('fs', '1')
+  compose.searchParams.set('to', 'lihongyao517@gmail.com')
+  if (message.searchParams.get('subject')) compose.searchParams.set('su', message.searchParams.get('subject'))
+  if (message.searchParams.get('body')) compose.searchParams.set('body', message.searchParams.get('body'))
+  return compose.toString()
 }
 
 app.whenReady().then(() => {
   rememberWorkspace(initialWorkspace())
+  migrateLegacyModelCredentials()
   loadLanguage()
   Menu.setApplicationMenu(null)
-  startBackend()
+  startBackend().catch((error) => console.error(`[hoya-desktop] ${error.message}`))
   createTray()
   configureAutoUpdater()
-  ipcMain.handle('hoya:server-url', () => `http://${serverHost}:${serverPort}`)
+  ipcMain.handle('hoya:server-connection', () => serverConnection())
+  ipcMain.handle('hoya:server-url', async () => (await serverConnection()).url)
   ipcMain.handle('hoya:get-app-version', () => app.getVersion())
   ipcMain.handle('hoya:check-for-updates', () => checkDesktopUpdates())
   ipcMain.handle('hoya:install-update', () => installDownloadedUpdate())
   ipcMain.handle('hoya:get-language', () => currentLanguage)
   ipcMain.handle('hoya:set-language', (_event, language) => setLanguage(language))
-  ipcMain.handle('hoya:get-saved-api-key', (_event, workspace) => savedApiKey(workspace))
+  ipcMain.handle('hoya:get-api-key', (_event, payload) => getApiKey(payload))
+  ipcMain.handle('hoya:save-api-key', (_event, payload) => saveApiKey(payload))
+  ipcMain.handle('hoya:delete-api-key', (_event, payload) => deleteApiKey(payload))
+  ipcMain.handle('hoya:get-saved-api-key', (_event, workspace) => getApiKey({ workspace }))
   ipcMain.handle('hoya:terminal-run', (event, payload) => startTerminalCommand(event, payload))
   ipcMain.handle('hoya:terminal-stop', (event, id) => stopTerminalCommand(event, id))
   ipcMain.handle('hoya:run-code', (event, payload) => runCodeSnippet(event, payload))
@@ -566,12 +909,10 @@ app.whenReady().then(() => {
     const resolved = terminalWorkingDirectory(value)
     return (await shell.openPath(resolved)) === ''
   })
-  ipcMain.handle('hoya:open-external', (_event, url) => {
-    const target = String(url || '')
-    const isWebUrl = /^https?:\/\//i.test(target)
-    const isFeedbackEmail = /^mailto:lihongyao517@gmail\.com(?:\?|$)/i.test(target)
-    if (!isWebUrl && !isFeedbackEmail) return false
-    shell.openExternal(target)
+  ipcMain.handle('hoya:open-external', async (_event, url) => {
+    const target = browserTargetForExternal(url)
+    if (!target) return false
+    await shell.openExternal(target)
     return true
   })
   ipcMain.handle('hoya:window-minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize())

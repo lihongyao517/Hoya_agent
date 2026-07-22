@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any, Iterator
 
+from .capabilities import capability_guidance
 from .config import Config
 from .llm import LLMClient
 from .conversations import ConversationStore
@@ -93,6 +94,7 @@ class HoyaAgent:
             self.config.pending_writes_path,
             self.config.require_write_approval,
             self.config.require_shell_approval,
+            self.config.permission_mode,
             self.changes,
         )
 
@@ -236,6 +238,9 @@ class HoyaAgent:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": self._runtime_guidance()},
         ]
+        capabilities = capability_guidance(self.config.workspace)
+        if capabilities:
+            messages.append({"role": "system", "content": capabilities})
         if memory_context:
             messages.append(
                 {

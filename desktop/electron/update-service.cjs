@@ -1,10 +1,10 @@
 const REPOSITORY_URL = 'https://github.com/lihongyao517/Hoya_agent'
 const TAGS_URL = `${REPOSITORY_URL}/tags`
 const RELEASES_URL = `${REPOSITORY_URL}/releases`
-const TAGS_API_URL = 'https://api.github.com/repos/lihongyao517/Hoya_agent/tags?per_page=20'
+const LATEST_RELEASE_URL = `${RELEASES_URL}/latest`
 
 function versionParts(value) {
-  const match = String(value || '').trim().match(/(\d+)(?:\.(\d+))?(?:\.(\d+))?/)
+  const match = String(value || '').trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?(?:[-+].*)?$/i)
   if (!match) return null
   return [Number(match[1]), Number(match[2] || 0), Number(match[3] || 0)]
 }
@@ -20,11 +20,15 @@ function compareVersions(left, right) {
   return 0
 }
 
-function newestTag(tags) {
-  return (Array.isArray(tags) ? tags : [])
-    .map((tag) => String(tag?.name || '').trim())
-    .filter((name) => versionParts(name))
-    .sort((left, right) => compareVersions(right, left))[0] || ''
+function releaseTagFromUrl(value) {
+  try {
+    const url = new URL(String(value || ''))
+    const match = url.pathname.match(/\/releases\/tag\/([^/]+)\/?$/)
+    const tag = match ? decodeURIComponent(match[1]) : ''
+    return versionParts(tag) ? tag : ''
+  } catch {
+    return ''
+  }
 }
 
 async function checkForUpdates(currentVersion, fetchImpl = globalThis.fetch) {
@@ -32,17 +36,18 @@ async function checkForUpdates(currentVersion, fetchImpl = globalThis.fetch) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 12000)
   try {
-    const response = await fetchImpl(TAGS_API_URL, {
+    const response = await fetchImpl(LATEST_RELEASE_URL, {
+      redirect: 'follow',
       headers: {
-        Accept: 'application/vnd.github+json',
+        Accept: 'text/html',
         'User-Agent': `Hoya-Agent/${currentVersion}`,
-        'X-GitHub-Api-Version': '2022-11-28',
       },
       signal: controller.signal,
     })
-    if (!response.ok) throw new Error(`GitHub Tags returned HTTP ${response.status}`)
-    const latestTag = newestTag(await response.json())
-    if (!latestTag) throw new Error('GitHub Tags did not return a valid version tag.')
+    if (!response.ok) throw new Error(`GitHub Releases returned HTTP ${response.status}`)
+    const location = response.url || response.headers?.get?.('location') || ''
+    const latestTag = releaseTagFromUrl(location)
+    if (!latestTag) throw new Error('GitHub did not redirect to a published version release.')
     return {
       ok: true,
       currentVersion,
@@ -63,6 +68,6 @@ module.exports = {
   TAGS_URL,
   checkForUpdates,
   compareVersions,
-  newestTag,
+  releaseTagFromUrl,
   versionParts,
 }

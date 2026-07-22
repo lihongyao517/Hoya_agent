@@ -61,6 +61,8 @@ class Settings:
     x402_verify_url: str = ""
     x402_api_key: str = ""
     usage_log_path: Path = Path("data/usage.jsonl")
+    max_request_bytes: int = 12_000_000
+    max_upload_bytes: int = 10_000_000
 
     @classmethod
     def load(cls, env_path_value: Path) -> "Settings":
@@ -76,6 +78,12 @@ class Settings:
             raise ValueError("LSA_AGENT_MAX_TOP_K must be positive.")
         if agent_default_top_k <= 0:
             raise ValueError("LSA_AGENT_DEFAULT_TOP_K must be positive.")
+        max_request_bytes = env_int("LSA_MAX_REQUEST_BYTES", "12000000")
+        max_upload_bytes = env_int("LSA_MAX_UPLOAD_BYTES", "10000000")
+        if max_request_bytes <= 0:
+            raise ValueError("LSA_MAX_REQUEST_BYTES must be positive.")
+        if max_upload_bytes <= 0:
+            raise ValueError("LSA_MAX_UPLOAD_BYTES must be positive.")
 
         return cls(
             host=os.getenv("LSA_HOST", "127.0.0.1"),
@@ -99,4 +107,6 @@ class Settings:
             x402_verify_url=os.getenv("LSA_X402_VERIFY_URL", "").strip(),
             x402_api_key=os.getenv("LSA_X402_API_KEY", "").strip(),
             usage_log_path=env_path(base_dir, "LSA_USAGE_LOG_PATH", "data/usage.jsonl"),
+            max_request_bytes=max_request_bytes,
+            max_upload_bytes=max_upload_bytes,
         )

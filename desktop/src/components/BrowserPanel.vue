@@ -32,17 +32,22 @@ async function bindWebview() {
   const onStop = () => { loading.value = false }
   const onNavigate = (event: Event) => {
     const url = String((event as Event & { url?: string }).url || '')
-    if (url) address.value = url
+    if (url) {
+      address.value = url
+      activeUrl.value = url
+    }
   }
   const onTitle = (event: Event) => { pageTitle.value = String((event as Event & { title?: string }).title || '项目预览') }
   view.addEventListener('did-start-loading', onStart)
   view.addEventListener('did-stop-loading', onStop)
   view.addEventListener('did-navigate', onNavigate)
+  view.addEventListener('did-navigate-in-page', onNavigate)
   view.addEventListener('page-title-updated', onTitle)
   cleanup = [
     () => view.removeEventListener('did-start-loading', onStart),
     () => view.removeEventListener('did-stop-loading', onStop),
     () => view.removeEventListener('did-navigate', onNavigate),
+    () => view.removeEventListener('did-navigate-in-page', onNavigate),
     () => view.removeEventListener('page-title-updated', onTitle),
   ]
 }
@@ -74,7 +79,7 @@ onMounted(() => nextTick(() => addressInput.value?.focus()))
         <el-button text :icon="ArrowRight" aria-label="前进" title="前进" @click="goForward" />
         <el-button text :icon="Refresh" :loading="loading" aria-label="刷新" title="刷新" @click="reload" />
       </div>
-      <el-input ref="addressInput" v-model="address" class="address-input" :prefix-icon="Link" @keyup.enter="navigate" />
+      <el-input ref="addressInput" v-model="address" class="address-input" :prefix-icon="Link" aria-label="预览地址" @keyup.enter="navigate" />
       <el-radio-group v-model="viewport" size="small" aria-label="预览视口">
         <el-radio-button value="desktop">桌面</el-radio-button>
         <el-radio-button value="tablet">平板</el-radio-button>
@@ -90,7 +95,7 @@ onMounted(() => nextTick(() => addressInput.value?.focus()))
           v-else
           ref="webview"
           :src="activeUrl"
-          partition="persist:hoya-preview"
+          partition="hoya-preview"
           webpreferences="contextIsolation=yes,nodeIntegration=no,sandbox=yes"
         />
       </div>
@@ -107,8 +112,8 @@ onMounted(() => nextTick(() => addressInput.value?.focus()))
 .address-input { min-width: 180px; flex: 1; }
 .address-input :deep(.el-input__wrapper) { border-radius: 8px; color: #e8e9eb; background: #222326; box-shadow: 0 0 0 1px #3a3c40 inset; }
 .browser-meta { gap: 10px; min-width: 0; padding: 0 14px; color: #858990; background: #171818; font-size: 10px; }
-.browser-meta strong { color: #d8dade; font-size: 11px; }
-.browser-meta span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-meta strong { flex: 0 1 38%; overflow: hidden; color: #d8dade; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.browser-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-stage { min-height: 0; overflow: auto; padding: 12px; background: #121313; }
 .preview-frame { height: 100%; min-height: 260px; margin: 0 auto; overflow: hidden; border: 1px solid #383a3f; border-radius: 10px; background: #fff; box-shadow: 0 12px 30px rgba(0, 0, 0, .28); transition: width 180ms ease; }
 .preview-frame.desktop { width: 100%; }
@@ -129,14 +134,14 @@ webview { display: flex; width: 100%; height: 100%; }
 .compact .browser-meta { padding-inline: 10px; }
 .compact .preview-stage { padding: 8px; }
 .compact .preview-frame { min-height: 220px; }
-:global(html[data-theme='light']) .browser-panel { color: #292b2f; background: #f4f4f5; }
-:global(html[data-theme='light']) .browser-toolbar { border-color: #d5d6da; background: #f1f1f2; }
-:global(html[data-theme='light']) .address-input :deep(.el-input__wrapper) { color: #292b2f; background: #ffffff; box-shadow: 0 0 0 1px #d5d6da inset; }
-:global(html[data-theme='light']) .browser-meta { color: #74777d; background: #ececee; }
-:global(html[data-theme='light']) .browser-meta strong { color: #3f4247; }
-:global(html[data-theme='light']) .preview-stage { background: #f4f4f5; }
-:global(html[data-theme='light']) .preview-frame { border-color: #cfd0d4; box-shadow: 0 10px 26px rgba(32, 34, 37, .12); }
-:global(html[data-theme='light']) .browser-empty { color: #74777d; background: #ffffff; }
-:global(html[data-theme='light']) .browser-empty strong { color: #292b2f; }
-:global(html[data-theme='light']) .browser-empty svg { color: #666970; }
+html[data-theme='light'] .browser-panel { color: #292b2f; background: #f4f4f5; }
+html[data-theme='light'] .browser-toolbar { border-color: #d5d6da; background: #f1f1f2; }
+html[data-theme='light'] .address-input :deep(.el-input__wrapper) { color: #292b2f; background: #ffffff; box-shadow: 0 0 0 1px #d5d6da inset; }
+html[data-theme='light'] .browser-meta { color: #5f6268; background: #ececee; }
+html[data-theme='light'] .browser-meta strong { color: #3f4247; }
+html[data-theme='light'] .preview-stage { background: #f4f4f5; }
+html[data-theme='light'] .preview-frame { border-color: #cfd0d4; box-shadow: 0 10px 26px rgba(32, 34, 37, .12); }
+html[data-theme='light'] .browser-empty { color: #74777d; background: #ffffff; }
+html[data-theme='light'] .browser-empty strong { color: #292b2f; }
+html[data-theme='light'] .browser-empty svg { color: #666970; }
 </style>

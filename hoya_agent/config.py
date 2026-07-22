@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+
+from .state_paths import migrate_workspace_state, workspace_config_path
 
 DEFAULT_LLM_PROVIDER = "openai-compatible"
 ANTHROPIC_PROVIDER = "anthropic"
@@ -15,28 +18,26 @@ SUPPORTED_LLM_PROVIDERS = {DEFAULT_LLM_PROVIDER, ANTHROPIC_PROVIDER, OLLAMA_PROV
 SUPPORTED_REASONING_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 REASONING_EFFORT_ALIASES = {"minimal": "low", "standard": "medium"}
 DEFAULT_REASONING_EFFORT = "medium"
+_CONFIG_WRITE_LOCK = threading.RLock()
 
 API_CONFIG_KEYS = {
     "HOYA_LLM_PROVIDER",
-    "HOYA_API_KEY",
     "HOYA_BASE_URL",
     "HOYA_MODEL",
     "HOYA_WIRE_API",
     "HOYA_REASONING_EFFORT",
     "HOYA_SHOW_REASONING",
+    "HOYA_PERMISSION_MODE",
+    "HOYA_ALLOW_SHELL",
+    "HOYA_ALLOW_DESKTOP",
+    "HOYA_REQUIRE_WRITE_APPROVAL",
+    "HOYA_REQUIRE_SHELL_APPROVAL",
+    "HOYA_TEMPERATURE",
+    "HOYA_MAX_STEPS",
+    "HOYA_HISTORY_CONTEXT_LIMIT",
+    "HOYA_HISTORY_ENTRY_MAX_CHARS",
+    "HOYA_TOOL_RESULT_MAX_CHARS",
 }
-
-
-def _migrate_workspace_state(workspace: Path, state_dir: Path, legacy_name: str, new_name: str) -> Path:
-    current = state_dir / new_name
-    legacy = workspace / legacy_name
-    if current.exists() or not legacy.exists():
-        return current
-    try:
-        legacy.replace(current)
-    except OSError:
-        return legacy
-    return current
 
 
 def dotenv_values(path: Path) -> dict[str, str]:
@@ -93,23 +94,49 @@ def _apply_provider_defaults(values: dict[str, str]) -> dict[str, str]:
     return values
 
 
-def read_api_config_values(workspace: Path) -> dict[str, str]:
-    values = dotenv_values(workspace / ".env")
+def read_api_config_values(workspace: Path, session_api_key: str | None = None) -> dict[str, str]:
+    """Read Hoya settings without loading project variables into process state.
+
+    New settings live in private application data. A project-level ``.env`` is
+    read only as a compatibility fallback. Electron always passes a session key
+    value (including an empty one), so project secrets are ignored there. CLI and
+    TUI calls leave it as ``None`` and may still read a legacy project API key.
+    """
+    legacy = dotenv_values(workspace / ".env")
+    private = dotenv_values(workspace_config_path(workspace))
 
     def setting(name: str, default: str = "") -> str:
-        return values.get(name, os.getenv(name, default)).strip()
+        if name in private:
+            return private[name].strip()
+        if name in legacy and name != "HOYA_API_KEY":
+            return legacy[name].strip()
+        return os.getenv(name, default).strip()
 
-    return _apply_provider_defaults(
+    values = _apply_provider_defaults(
         {
             "HOYA_LLM_PROVIDER": normalize_provider(setting("HOYA_LLM_PROVIDER", DEFAULT_LLM_PROVIDER)),
-            "HOYA_API_KEY": setting("HOYA_API_KEY"),
+            "HOYA_API_KEY": (
+                session_api_key
+                if session_api_key is not None
+                else os.getenv("HOYA_API_KEY", legacy.get("HOYA_API_KEY", ""))
+            ).strip(),
             "HOYA_BASE_URL": setting("HOYA_BASE_URL").rstrip("/"),
             "HOYA_MODEL": setting("HOYA_MODEL"),
             "HOYA_WIRE_API": setting("HOYA_WIRE_API", "chat").lower() or "chat",
             "HOYA_REASONING_EFFORT": normalize_reasoning_effort(setting("HOYA_REASONING_EFFORT", DEFAULT_REASONING_EFFORT)),
             "HOYA_SHOW_REASONING": setting("HOYA_SHOW_REASONING", "1") or "1",
+            "HOYA_PERMISSION_MODE": setting("HOYA_PERMISSION_MODE", "risk").lower() or "risk",
+            "HOYA_ALLOW_SHELL": setting("HOYA_ALLOW_SHELL", "0") or "0",
+            "HOYA_ALLOW_DESKTOP": setting("HOYA_ALLOW_DESKTOP", "0") or "0",
+            "HOYA_REQUIRE_WRITE_APPROVAL": setting("HOYA_REQUIRE_WRITE_APPROVAL", "0") or "0",
+            "HOYA_REQUIRE_SHELL_APPROVAL": setting("HOYA_REQUIRE_SHELL_APPROVAL", "1") or "1",
         }
     )
+    if not private:
+        legacy_settings = {key: value for key, value in legacy.items() if key in API_CONFIG_KEYS}
+        if legacy_settings:
+            write_dotenv_values(workspace_config_path(workspace), legacy_settings)
+    return values
 
 
 def _has_newline(value: str) -> bool:
@@ -158,9 +185,9 @@ def validate_api_config_update(payload: dict, existing: dict[str, str]) -> tuple
     elif provider == ANTHROPIC_PROVIDER:
         base_url = base_url or ANTHROPIC_DEFAULT_BASE_URL
         wire_api = "messages"
-        if not api_key:
+        if not api_key and not clear_api_key:
             field_errors["api_key"] = "API key is required for Anthropic providers."
-    elif not api_key:
+    elif not api_key and not clear_api_key:
         field_errors["api_key"] = "API key is required for OpenAI-compatible providers."
 
     if _has_newline(base_url):
@@ -218,6 +245,11 @@ def _format_dotenv_value(value: str) -> str:
 
 
 def write_dotenv_values(path: Path, updates: dict[str, str]) -> None:
+    with _CONFIG_WRITE_LOCK:
+        _write_dotenv_values_unlocked(path, updates)
+
+
+def _write_dotenv_values_unlocked(path: Path, updates: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     normalized = {key: value for key, value in updates.items() if key in API_CONFIG_KEYS}
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
@@ -238,15 +270,35 @@ def write_dotenv_values(path: Path, updates: dict[str, str]) -> None:
 
     if next_lines and next_lines[-1].strip():
         next_lines.append("")
-    for key in ["HOYA_LLM_PROVIDER", "HOYA_API_KEY", "HOYA_BASE_URL", "HOYA_MODEL", "HOYA_WIRE_API", "HOYA_REASONING_EFFORT", "HOYA_SHOW_REASONING"]:
+    for key in [
+        "HOYA_LLM_PROVIDER",
+        "HOYA_BASE_URL",
+        "HOYA_MODEL",
+        "HOYA_WIRE_API",
+        "HOYA_REASONING_EFFORT",
+        "HOYA_SHOW_REASONING",
+        "HOYA_PERMISSION_MODE",
+        "HOYA_ALLOW_SHELL",
+        "HOYA_ALLOW_DESKTOP",
+        "HOYA_REQUIRE_WRITE_APPROVAL",
+        "HOYA_REQUIRE_SHELL_APPROVAL",
+        "HOYA_TEMPERATURE",
+        "HOYA_MAX_STEPS",
+        "HOYA_HISTORY_CONTEXT_LIMIT",
+        "HOYA_HISTORY_ENTRY_MAX_CHARS",
+        "HOYA_TOOL_RESULT_MAX_CHARS",
+    ]:
         if key not in seen and key in normalized:
             next_lines.append(f"{key}={_format_dotenv_value(normalized[key])}")
 
-    path.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text("\n".join(next_lines).rstrip() + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 @dataclass(frozen=True)
 class Config:
+    configured: bool
     provider: str
     api_key: str
     base_url: str
@@ -263,6 +315,7 @@ class Config:
     allow_desktop: bool
     require_write_approval: bool
     require_shell_approval: bool
+    permission_mode: str
     workspace: Path
     memory_path: Path
     history_path: Path
@@ -277,15 +330,25 @@ class Config:
     versions_dir: Path
 
     @classmethod
-    def from_env(cls, workspace: Path | None = None, reload_dotenv: bool = False) -> "Config":
+    def from_env(
+        cls,
+        workspace: Path | None = None,
+        reload_dotenv: bool = False,
+        *,
+        session_api_key: str | None = None,
+    ) -> "Config":
         workspace = (workspace or Path.cwd()).resolve()
-        env_file = dotenv_values(workspace / ".env") if reload_dotenv else {}
-        if not reload_dotenv:
-            load_dotenv(workspace / ".env")
+        values = read_api_config_values(workspace, session_api_key=session_api_key)
+        private_values = dotenv_values(workspace_config_path(workspace))
+        legacy_values = dotenv_values(workspace / ".env")
 
         def env(name: str, default: str = "") -> str:
-            if reload_dotenv and name in env_file:
-                return env_file[name]
+            if name in values:
+                return values[name]
+            if name in private_values:
+                return private_values[name]
+            if name in legacy_values and name != "HOYA_API_KEY":
+                return legacy_values[name]
             return os.getenv(name, default)
 
         provider = normalize_provider(env("HOYA_LLM_PROVIDER", DEFAULT_LLM_PROVIDER))
@@ -306,15 +369,7 @@ class Config:
         elif provider == ANTHROPIC_PROVIDER:
             base_url = base_url or ANTHROPIC_DEFAULT_BASE_URL
             wire_api = "messages"
-            if not api_key:
-                raise ValueError("Missing HOYA_API_KEY for Anthropic provider.")
-        elif not api_key:
-            raise ValueError("Missing HOYA_API_KEY for openai-compatible provider. For Ollama set HOYA_LLM_PROVIDER=ollama.")
 
-        if not base_url:
-            raise ValueError("Missing HOYA_BASE_URL. Example: https://relay.example.com/v1")
-        if not model:
-            raise ValueError("Missing HOYA_MODEL. Example: gpt-4o-mini")
         if wire_api not in {"chat", "responses", "messages"}:
             raise ValueError("HOYA_WIRE_API must be chat, responses, or messages.")
         if provider == DEFAULT_LLM_PROVIDER and wire_api == "messages":
@@ -328,10 +383,12 @@ class Config:
         history_chars_default = "1200" if local_defaults else "4000"
         tool_result_default = "4000" if local_defaults else "12000"
 
-        state_dir = workspace / ".hoya"
-        state_dir.mkdir(parents=True, exist_ok=True)
+        permission_mode = env("HOYA_PERMISSION_MODE", "risk").strip().lower()
+        if permission_mode not in {"strict", "risk", "yolo"}:
+            permission_mode = "risk"
 
         return cls(
+            configured=provider == OLLAMA_PROVIDER or bool(api_key and base_url and model),
             provider=provider,
             api_key=api_key,
             base_url=base_url,
@@ -348,22 +405,37 @@ class Config:
             allow_desktop=env("HOYA_ALLOW_DESKTOP", "0").strip() == "1",
             require_write_approval=env("HOYA_REQUIRE_WRITE_APPROVAL", "0").strip() == "1",
             require_shell_approval=env("HOYA_REQUIRE_SHELL_APPROVAL", "1").strip() == "1",
+            permission_mode=permission_mode,
             workspace=workspace,
-            memory_path=_migrate_workspace_state(workspace, state_dir, ".hoya_memory.json", "memory.json"),
-            history_path=_migrate_workspace_state(workspace, state_dir, ".hoya_history.jsonl", "history.jsonl"),
+            memory_path=migrate_workspace_state(
+                workspace, "memory.json", ".hoya/memory.json", ".hoya_memory.json"
+            ),
+            history_path=migrate_workspace_state(
+                workspace, "history.jsonl", ".hoya/history.jsonl", ".hoya_history.jsonl"
+            ),
             imports_dir=workspace / "imports",
-            index_path=_migrate_workspace_state(workspace, state_dir, ".hoya_index.json", "index.json"),
-            run_log_path=_migrate_workspace_state(workspace, state_dir, ".hoya_runs.jsonl", "runs.jsonl"),
-            pending_writes_path=_migrate_workspace_state(
-                workspace, state_dir, ".hoya_pending_writes.json", "pending_writes.json"
+            index_path=migrate_workspace_state(
+                workspace, "index.json", ".hoya/index.json", ".hoya_index.json"
             ),
-            conversations_index_path=_migrate_workspace_state(
-                workspace, state_dir, ".hoya_conversations.json", "conversations.json"
+            run_log_path=migrate_workspace_state(
+                workspace, "runs.jsonl", ".hoya/runs.jsonl", ".hoya_runs.jsonl"
             ),
-            conversations_dir=_migrate_workspace_state(
-                workspace, state_dir, ".hoya_conversations", "conversations"
+            pending_writes_path=migrate_workspace_state(
+                workspace, "pending_writes.json", ".hoya/pending_writes.json", ".hoya_pending_writes.json"
             ),
-            task_runs_path=state_dir / "task_runs.json",
-            versions_index_path=state_dir / "versions.json",
-            versions_dir=state_dir / "versions",
+            conversations_index_path=migrate_workspace_state(
+                workspace, "conversations.json", ".hoya/conversations.json", ".hoya_conversations.json"
+            ),
+            conversations_dir=migrate_workspace_state(
+                workspace, "conversations", ".hoya/conversations", ".hoya_conversations"
+            ),
+            task_runs_path=migrate_workspace_state(
+                workspace, "task_runs.json", ".hoya/task_runs.json", ".hoya_task_runs.json"
+            ),
+            versions_index_path=migrate_workspace_state(
+                workspace, "versions.json", ".hoya/versions.json", ".hoya_versions.json"
+            ),
+            versions_dir=migrate_workspace_state(
+                workspace, "versions", ".hoya/versions", ".hoya_versions"
+            ),
         )

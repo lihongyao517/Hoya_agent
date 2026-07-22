@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import uuid
 import zipfile
@@ -12,9 +13,11 @@ from typing import Any, Callable
 from xml.etree import ElementTree
 import difflib
 
+from .capabilities import discover_mcp_servers, discover_skills
 from .memory import MemoryStore
+from .path_security import is_sensitive_path
 from .run_state import ChangeStore
-from .workspace_ops import build_index, search_index
+from .workspace_ops import append_pending_operation, build_index, sanitized_subprocess_environment, search_index
 
 
 TEXT_EXTENSIONS = {
@@ -54,6 +57,11 @@ SKIP_DIRS = {
     "venv",
 }
 SKIP_FILE_PREFIXES = (".hoya_",)
+MAX_LIST_FILES = 1000
+MAX_READ_CHARS = 100_000
+MAX_SEARCH_RESULTS = 200
+MAX_INDEX_FILES = 5000
+MAX_SHELL_TIMEOUT_SECONDS = 120
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -96,63 +104,59 @@ def _should_skip_workspace_path(root: Path, path: Path) -> bool:
     relative_parts = path.relative_to(root).parts
     if any(part in SKIP_DIRS for part in relative_parts):
         return True
-    return path.name.startswith(SKIP_FILE_PREFIXES)
+    return path.name.startswith(SKIP_FILE_PREFIXES) or is_sensitive_path(path, root)
 
 
 def _text_result(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
 
 
-def _load_json_list(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
-
-
-def _save_json_list(path: Path, entries: list[dict[str, Any]]) -> None:
-    path.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-DANGEROUS_SHELL_TOKENS = (
-    "remove-item",
-    "rm ",
-    "rmdir",
-    "del ",
-    "format",
-    "reg ",
-    "regedit",
-    "set-executionpolicy",
-    "invoke-webrequest",
-    "iwr ",
-    "curl ",
-    "wget ",
-    "start-process",
-    "schtasks",
-    "net user",
-    "icacls",
-    "takeown",
+DANGEROUS_SHELL_PATTERNS = (
+    (r"\bremove-item\b", "remove-item"),
+    (r"\brm\b", "rm"),
+    (r"\brmdir\b", "rmdir"),
+    (r"\bdel\b", "del"),
+    (r"\bformat\b", "format"),
+    (r"\breg(?:edit)?\b", "reg"),
+    (r"\bset-executionpolicy\b", "set-executionpolicy"),
+    (r"\binvoke-(?:webrequest|restmethod)\b", "invoke-webrequest"),
+    (r"\b(?:iwr|irm|curl|wget)\b", "download command"),
+    (r"\bstart-process\b", "start-process"),
+    (r"\bschtasks\b", "schtasks"),
+    (r"\bnet\s+user\b", "net user"),
+    (r"\bicacls\b", "icacls"),
+    (r"\btakeown\b", "takeown"),
 )
 
 
+def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
 def assess_shell_risk(command: str) -> dict[str, Any]:
-    lowered = f" {command.lower()} "
-    hits = [token.strip() for token in DANGEROUS_SHELL_TOKENS if token in lowered]
+    lowered = command.lower()
+    hits = [label for pattern, label in DANGEROUS_SHELL_PATTERNS if re.search(pattern, lowered)]
     if hits:
         return {
             "level": "high",
             "allowed": False,
             "reasons": [f"dangerous token: {token}" for token in hits],
         }
-    if any(token in command for token in ["..", "; cd", "Set-Location", "Push-Location"]):
+    if ".." in command or re.search(r"(?:^|[;&|]\s*)(?:cd|set-location|push-location)\b", lowered):
         return {
             "level": "medium",
             "allowed": False,
             "reasons": ["command attempts to change or escape the workspace"],
         }
-    return {"level": "low", "allowed": True, "reasons": ["workspace-scoped command with no blocked tokens detected"]}
+    return {
+        "level": "medium",
+        "allowed": False,
+        "reasons": ["PowerShell is not filesystem-sandboxed and requires explicit approval"],
+    }
 
 
 def assess_write_risk(relative_path: str, content: str, exists: bool) -> dict[str, Any]:
@@ -223,6 +227,7 @@ def build_tools(
     pending_writes_path: Path,
     require_write_approval: bool,
     require_shell_approval: bool,
+    permission_mode: str = "risk",
     change_store: ChangeStore | None = None,
 ) -> dict[str, Tool]:
     ws = Workspace(workspace)
@@ -233,7 +238,7 @@ def build_tools(
 
     def list_files(args: dict[str, Any]) -> Any:
         start = ws.resolve(args.get("path", "."))
-        max_files = int(args.get("max_files", 200))
+        max_files = bounded_int(args.get("max_files"), 200, 1, MAX_LIST_FILES)
         if not start.exists():
             return {"error": "path does not exist"}
         files = []
@@ -249,7 +254,9 @@ def build_tools(
     def read_file(args: dict[str, Any]) -> Any:
         path = ws.resolve(args["path"])
         relative = ws.relative(path)
-        max_chars = int(args.get("max_chars", 20000))
+        max_chars = bounded_int(args.get("max_chars"), 20000, 1, MAX_READ_CHARS)
+        if is_sensitive_path(path, ws.root):
+            return {"error": "reading sensitive credential files is blocked", "path": relative}
         if not path.exists():
             return {"error": "file does not exist", "path": args["path"]}
         if path.is_dir():
@@ -268,8 +275,13 @@ def build_tools(
         content = args["content"]
         run_id = str(args.get("_hoya_run_id", ""))
         relative = ws.relative(path)
+        if is_sensitive_path(path, ws.root):
+            return {"error": "writing sensitive credential or repository-control files is blocked", "path": relative}
         risk = assess_write_risk(relative, content, path.exists())
-        if require_write_approval:
+        should_approve = require_write_approval or permission_mode == "strict" or (
+            permission_mode == "risk" and risk.get("level") != "low"
+        )
+        if should_approve:
             old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
             diff = "\n".join(
                 difflib.unified_diff(
@@ -280,9 +292,9 @@ def build_tools(
                     lineterm="",
                 )
             )
-            entries = _load_json_list(pending_writes_path)
             pending_id = uuid.uuid4().hex[:8]
-            entries.append(
+            append_pending_operation(
+                pending_writes_path,
                 {
                     "id": pending_id,
                     "operation": "write_file",
@@ -292,9 +304,8 @@ def build_tools(
                     "risk": risk,
                     "run_id": run_id,
                     "created_at": datetime.now().isoformat(timespec="seconds"),
-                }
+                },
             )
-            _save_json_list(pending_writes_path, entries)
             return {
                 "ok": False,
                 "pending": True,
@@ -314,7 +325,9 @@ def build_tools(
     def read_document(args: dict[str, Any]) -> Any:
         path = ws.resolve(args["path"])
         relative = ws.relative(path)
-        max_chars = int(args.get("max_chars", 30000))
+        max_chars = bounded_int(args.get("max_chars"), 30000, 1, MAX_READ_CHARS)
+        if is_sensitive_path(path, ws.root):
+            return {"error": "reading sensitive credential files is blocked", "path": relative}
         if not path.exists():
             return {"error": "file does not exist", "path": args["path"]}
         if path.is_dir():
@@ -354,16 +367,51 @@ def build_tools(
             file_name += ".txt"
 
         desktop = desktop_dir()
-        desktop.mkdir(parents=True, exist_ok=True)
         path = desktop / file_name
         content = args.get("content", "")
+        run_id = str(args.get("_hoya_run_id", ""))
+        risk = {
+            "level": "high",
+            "allowed": True,
+            "reasons": ["writes outside the selected workspace"],
+        }
+        if require_write_approval or permission_mode != "yolo":
+            pending_id = uuid.uuid4().hex[:8]
+            append_pending_operation(
+                pending_writes_path,
+                {
+                    "id": pending_id,
+                    "operation": "write_desktop_file",
+                    "file_name": file_name,
+                    "content": content,
+                    "path": str(path),
+                    "risk": risk,
+                    "run_id": run_id,
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+            return {
+                "ok": False,
+                "pending": True,
+                "id": pending_id,
+                "path": str(path),
+                "message": "Desktop write is pending approval.",
+                "risk": risk,
+                "run_id": run_id,
+            }
+        desktop.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
-        return {"ok": True, "path": str(path), "bytes": len(content.encode("utf-8"))}
+        return {
+            "ok": True,
+            "path": str(path),
+            "bytes": len(content.encode("utf-8")),
+            "risk": risk,
+        }
 
     def search_text(args: dict[str, Any]) -> Any:
         query = args["query"]
         start = ws.resolve(args.get("path", "."))
-        max_results = int(args.get("max_results", 50))
+        max_results = bounded_int(args.get("max_results"), 50, 1, MAX_SEARCH_RESULTS)
         results = []
         if not start.exists():
             return {"error": "path does not exist"}
@@ -397,7 +445,7 @@ def build_tools(
         return {"results": results}
 
     def index_files(args: dict[str, Any]) -> Any:
-        max_files = int(args.get("max_files", 1000))
+        max_files = bounded_int(args.get("max_files"), 1000, 1, MAX_INDEX_FILES)
         payload = build_index(ws.root, index_path, max_files=max_files)
         return {
             "ok": True,
@@ -417,23 +465,49 @@ def build_tools(
         query = str(args.get("query", "")).strip()
         return {"memory": memory.relevant(query, limit) if query else memory.recent(limit)}
 
+    def list_skills(args: dict[str, Any]) -> Any:
+        return {"skills": discover_skills(ws.root)}
+
+    def read_skill(args: dict[str, Any]) -> Any:
+        name = str(args.get("name", "")).strip()
+        if not name:
+            return {"error": "name is required"}
+        skills = discover_skills(ws.root)
+        selected = next((skill for skill in skills if skill.get("name") == name or Path(skill.get("path", "")).parent.name == name), None)
+        if selected is None:
+            return {"error": f"skill not found: {name}", "skills": skills}
+        path = Path(selected["path"]).resolve()
+        skills_root = (ws.root / ".agents" / "skills").resolve()
+        if skills_root not in path.parents:
+            return {"error": "skill path is outside the workspace skills directory"}
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return {"skill": selected, "content": text[:MAX_READ_CHARS], "truncated": len(text) > MAX_READ_CHARS}
+
+    def list_mcp_servers(args: dict[str, Any]) -> Any:
+        return {"servers": discover_mcp_servers(ws.root)}
+
     def run_powershell(args: dict[str, Any]) -> Any:
         if not allow_shell:
             return {"error": "shell execution is disabled. Set HOYA_ALLOW_SHELL=1 to enable it."}
         command = args["command"]
-        timeout_seconds = int(args.get("timeout_seconds", 30))
+        timeout_seconds = bounded_int(args.get("timeout_seconds"), 30, 1, MAX_SHELL_TIMEOUT_SECONDS)
         run_id = str(args.get("_hoya_run_id", ""))
         risk = assess_shell_risk(command)
-        if not risk.get("allowed", False):
+        should_approve = require_shell_approval or permission_mode == "strict" or (
+            permission_mode == "risk" and risk.get("level") != "low"
+        )
+        if not risk.get("allowed", False) and permission_mode == "yolo":
+            risk = {**risk, "allowed": True, "reasons": [*risk.get("reasons", []), "YOLO permission granted by user"]}
+        elif not risk.get("allowed", False) and not should_approve:
             return {
                 "error": "command rejected by risk check",
                 "command": command,
                 "risk": risk,
             }
-        if require_shell_approval:
-            entries = _load_json_list(pending_writes_path)
+        if should_approve:
             pending_id = uuid.uuid4().hex[:8]
-            entries.append(
+            append_pending_operation(
+                pending_writes_path,
                 {
                     "id": pending_id,
                     "operation": "run_powershell",
@@ -442,9 +516,8 @@ def build_tools(
                     "risk": risk,
                     "run_id": run_id,
                     "created_at": datetime.now().isoformat(timespec="seconds"),
-                }
+                },
             )
-            _save_json_list(pending_writes_path, entries)
             return {
                 "ok": False,
                 "pending": True,
@@ -458,6 +531,7 @@ def build_tools(
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
             cwd=ws.root,
+            env=sanitized_subprocess_environment(),
             text=True,
             capture_output=True,
             timeout=timeout_seconds,
@@ -640,6 +714,43 @@ def build_tools(
                 },
             },
             handler=recall_memory,
+        ),
+        "list_skills": Tool(
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "list_skills",
+                    "description": "List installed workspace skills from .agents/skills.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            handler=list_skills,
+        ),
+        "read_skill": Tool(
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "read_skill",
+                    "description": "Read an installed workspace skill's SKILL.md by name before applying that skill.",
+                    "parameters": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {"name": {"type": "string"}},
+                    },
+                },
+            },
+            handler=read_skill,
+        ),
+        "list_mcp_servers": Tool(
+            schema={
+                "type": "function",
+                "function": {
+                    "name": "list_mcp_servers",
+                    "description": "List detected MCP server configuration for this workspace.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            handler=list_mcp_servers,
         ),
         "run_powershell": Tool(
             schema={

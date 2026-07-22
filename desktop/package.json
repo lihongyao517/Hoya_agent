@@ -1,6 +1,6 @@
 {
   "name": "hoya-agent-desktop",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Local AI workspace agent for Windows",
   "author": "lihongyao517",
   "license": "MIT",
@@ -16,29 +16,32 @@
     "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ../build_backend.ps1",
     "build:renderer": "vue-tsc --noEmit && vite build",
     "test:electron": "node --test tests/*.test.cjs",
+    "test": "npm run test:electron",
     "build": "npm run build:renderer",
     "pack": "npm run build:renderer && electron-builder --dir",
     "clean:old-artifacts": "node scripts/clean-old-artifacts.cjs",
     "dist": "npm run build:renderer && electron-builder && npm run clean:old-artifacts",
     "dist:full": "npm run build:backend && npm run dist",
-    "release:github": "npm run build:backend && npm run build:renderer && electron-builder --publish always && npm run clean:old-artifacts",
+    "release:prepare": "npm run dist:full && npm run verify:update-artifacts",
+    "verify:update-artifacts": "node scripts/validate-update-artifacts.cjs",
     "start": "electron ."
   },
   "dependencies": {
-    "@element-plus/icons-vue": "^2.3.2",
-    "electron-updater": "^6.8.9",
-    "element-plus": "^2.14.3",
-    "vue": "^3.5.40"
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
     "@vitejs/plugin-vue": "^6.0.8",
     "concurrently": "^9.0.0",
-    "electron": "^33.0.0",
-    "electron-builder": "^25.0.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "element-plus": "^2.14.3",
     "typescript": "^5.0.0",
     "vite": "^7.0.0",
+    "vue": "^3.5.40",
     "vue-tsc": "^3.3.7",
-    "wait-on": "^8.0.0"
+    "wait-on": "^8.0.0",
+    "yaml": "^2.9.0"
   },
   "build": {
     "appId": "com.hoya.agent.desktop",
@@ -50,8 +53,14 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "assets/**/*",
+      "assets/icon.ico",
+      "assets/icon.png",
+      "assets/icon.svg",
       "package.json"
+    ],
+    "electronLanguages": [
+      "en-US",
+      "zh-CN"
     ],
     "extraResources": [
       {
@@ -75,8 +84,7 @@
         "nsis",
         "portable"
       ],
-      "icon": "assets/icon.ico",
-      "signAndEditExecutable": false
+      "icon": "assets/icon.ico"
     },
     "icon": "assets/icon.png",
     "nsis": {
@@ -84,7 +92,7 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "Hoya Agent"
     },

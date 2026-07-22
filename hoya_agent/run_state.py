@@ -9,6 +9,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .path_security import is_sensitive_path
+
+
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+
+
+def _shared_path_lock(path: Path) -> threading.RLock:
+    key = str(path.expanduser().resolve()).casefold()
+    with _PATH_LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.RLock())
+
 
 def timestamp() -> str:
     return datetime.now().isoformat(timespec="seconds")
@@ -25,7 +37,7 @@ def _read_json(path: Path, default: Any) -> Any:
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
 
@@ -47,14 +59,14 @@ class RunStore:
 
     def __init__(self, path: Path):
         self.path = path
-        self._lock = threading.RLock()
+        self._lock = _shared_path_lock(path)
 
     def _load(self) -> list[dict[str, Any]]:
         data = _read_json(self.path, [])
         return data if isinstance(data, list) else []
 
     def _save(self, entries: list[dict[str, Any]]) -> None:
-        _write_json(self.path, entries[-200:])
+        _write_json(self.path, entries)
 
     def create(self, run_id: str, conversation_id: str, task: str) -> dict[str, Any]:
         now = timestamp()
@@ -95,6 +107,14 @@ class RunStore:
         if conversation_id:
             entries = [item for item in entries if item.get("conversation_id") == conversation_id]
         return sorted(entries, key=lambda item: str(item.get("updated_at", "")), reverse=True)[: max(1, limit)]
+
+    def delete_conversation(self, conversation_id: str) -> list[str]:
+        """Delete durable runs owned by a conversation and return their IDs."""
+        with self._lock:
+            entries = self._load()
+            removed_ids = [str(item.get("id", "")) for item in entries if item.get("conversation_id") == conversation_id]
+            self._save([item for item in entries if item.get("conversation_id") != conversation_id])
+        return [run_id for run_id in removed_ids if run_id]
 
     def _update(self, run_id: str, updater: Any) -> dict[str, Any]:
         with self._lock:
@@ -193,19 +213,21 @@ class ChangeStore:
         self.workspace = workspace.resolve()
         self.index_path = index_path
         self.blobs_dir = blobs_dir
-        self._lock = threading.RLock()
+        self._lock = _shared_path_lock(index_path)
 
     def _load(self) -> list[dict[str, Any]]:
         data = _read_json(self.index_path, [])
         return data if isinstance(data, list) else []
 
     def _save(self, entries: list[dict[str, Any]]) -> None:
-        _write_json(self.index_path, entries[-500:])
+        _write_json(self.index_path, entries)
 
     def _target(self, relative_path: str) -> Path:
         target = (self.workspace / relative_path.replace("\\", "/")).resolve()
         if target != self.workspace and self.workspace not in target.parents:
             raise ValueError("version target is outside workspace")
+        if is_sensitive_path(target, self.workspace):
+            raise ValueError("version target is a sensitive path")
         return target
 
     @staticmethod
@@ -236,51 +258,53 @@ class ChangeStore:
         return {"ok": ok, "summary": summary, "sha256": digest, "checks": checks}
 
     def write_text(self, relative_path: str, content: str, run_id: str = "") -> dict[str, Any]:
-        target = self._target(relative_path)
-        existed = target.exists()
-        old_content = target.read_text(encoding="utf-8", errors="replace") if existed else ""
-        version_id = uuid.uuid4().hex[:12]
-        self.blobs_dir.mkdir(parents=True, exist_ok=True)
-        blob_path = self.blobs_dir / f"{version_id}.before"
-        blob_path.write_text(old_content, encoding="utf-8")
-        expected_sha = _sha256(content)
-
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        verification = self.verify_text(target, expected_sha)
-        entry = {
-            "id": version_id,
-            "run_id": run_id,
-            "path": str(target.relative_to(self.workspace)),
-            "created_at": timestamp(),
-            "before_exists": existed,
-            "before_sha256": _sha256(old_content) if existed else "",
-            "after_sha256": expected_sha,
-            "verification": verification,
-            "rolled_back_at": "",
-        }
         with self._lock:
+            target = self._target(relative_path)
+            existed = target.exists()
+            old_content = target.read_text(encoding="utf-8", errors="replace") if existed else ""
+            version_id = uuid.uuid4().hex[:12]
+            self.blobs_dir.mkdir(parents=True, exist_ok=True)
+            blob_path = self.blobs_dir / f"{version_id}.before"
+            blob_path.write_text(old_content, encoding="utf-8")
+            expected_sha = _sha256(content)
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(target)
+            verification = self.verify_text(target, expected_sha)
+            entry = {
+                "id": version_id,
+                "run_id": run_id,
+                "path": str(target.relative_to(self.workspace)),
+                "created_at": timestamp(),
+                "before_exists": existed,
+                "before_sha256": _sha256(old_content) if existed else "",
+                "after_sha256": expected_sha,
+                "verification": verification,
+                "rolled_back_at": "",
+            }
             entries = self._load()
             entries.append(entry)
             self._save(entries)
 
-        result = {
-            "ok": bool(verification.get("ok")),
-            "path": entry["path"],
-            "bytes": len(content.encode("utf-8")),
-            "version_id": version_id,
-            "verification": verification,
-        }
-        if not verification.get("ok"):
-            rollback = self.rollback(version_id, force=True)
-            result.update(
-                {
-                    "error": "change failed verification and was rolled back",
-                    "auto_rollback": rollback,
-                    "rolled_back_at": rollback.get("rolled_back_at", ""),
-                }
-            )
-        return result
+            result = {
+                "ok": bool(verification.get("ok")),
+                "path": entry["path"],
+                "bytes": len(content.encode("utf-8")),
+                "version_id": version_id,
+                "verification": verification,
+            }
+            if not verification.get("ok"):
+                rollback = self.rollback(version_id, force=True)
+                result.update(
+                    {
+                        "error": "change failed verification and was rolled back",
+                        "auto_rollback": rollback,
+                        "rolled_back_at": rollback.get("rolled_back_at", ""),
+                    }
+                )
+            return result
 
     def list(self, run_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:
@@ -292,6 +316,22 @@ class ChangeStore:
     def get(self, version_id: str) -> dict[str, Any] | None:
         with self._lock:
             return next((item for item in self._load() if item.get("id") == version_id), None)
+
+    def delete_runs(self, run_ids: list[str]) -> int:
+        run_id_set = {run_id for run_id in run_ids if run_id}
+        if not run_id_set:
+            return 0
+        with self._lock:
+            entries = self._load()
+            removed = [item for item in entries if str(item.get("run_id", "")) in run_id_set]
+            self._save([item for item in entries if str(item.get("run_id", "")) not in run_id_set])
+            for entry in removed:
+                blob = self.blobs_dir / f"{entry.get('id', '')}.before"
+                try:
+                    blob.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        return len(removed)
 
     def rollback(self, version_id: str, *, force: bool = False) -> dict[str, Any]:
         with self._lock:

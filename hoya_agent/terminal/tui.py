@@ -35,6 +35,7 @@ from ..workspace_ops import (
     apply_pending_operation,
     build_index,
     deny_pending_operation,
+    finalize_pending_operation,
     import_path,
     load_pending_writes,
     search_index,
@@ -607,6 +608,16 @@ class HoyaAgentApp(App[None]):
             if not arg:
                 self.add_message("system", "用法：/apply <id>", "error")
                 return
+            pending = next(
+                (entry for entry in load_pending_writes(self.config.pending_writes_path) if entry.get("id") == arg),
+                None,
+            )
+            pending_run_id = str((pending or {}).get("run_id", ""))
+            if pending_run_id and self.agent is not None:
+                run = self.agent.runs.get(pending_run_id)
+                if run is None or run.get("status") != "waiting_approval" or run.get("pending_approval_id") != arg:
+                    self.add_message("system", "该审批不再对应等待中的任务，未执行任何操作。", "error")
+                    return
             result = apply_pending_operation(
                 self.config.workspace,
                 self.config.pending_writes_path,
@@ -615,14 +626,17 @@ class HoyaAgentApp(App[None]):
                 change_store=self.agent.changes if self.agent is not None else None,
             )
             run_id = str(result.get("run_id", ""))
-            if run_id and self.agent is not None and self.agent.runs.get(run_id) is not None:
+            if result.get("consumed") and run_id and self.agent is not None and self.agent.runs.get(run_id) is not None:
                 if result.get("version_id"):
                     self.agent._register_change(run_id, result)
                 self.agent.runs.resolve_approval(run_id, "approved", result)
+                finalize_pending_operation(self.config.pending_writes_path, arg)
                 label = result.get("path") or f"shell returncode={result.get('returncode')}"
                 self.add_message("system", f"已批准并执行: {label}；正在恢复原任务。", "system")
                 self.begin_resume(run_id)
             elif result.get("ok"):
+                if result.get("consumed"):
+                    finalize_pending_operation(self.config.pending_writes_path, arg)
                 label = result.get("path") or f"shell returncode={result.get('returncode')}"
                 self.add_message("system", f"已批准并执行: {label}", "system")
             else:
@@ -638,9 +652,12 @@ class HoyaAgentApp(App[None]):
             if result.get("ok") and run_id and self.agent is not None and self.agent.runs.get(run_id) is not None:
                 denial = {**result, "ok": False, "denied": True, "error": "operation denied by user"}
                 self.agent.runs.resolve_approval(run_id, "denied", denial)
+                finalize_pending_operation(self.config.pending_writes_path, arg)
                 self.add_message("system", f"已拒绝待审批操作: {arg}；正在恢复原任务。", "system")
                 self.begin_resume(run_id)
             elif result.get("ok"):
+                if result.get("consumed"):
+                    finalize_pending_operation(self.config.pending_writes_path, arg)
                 self.add_message("system", f"已拒绝待审批操作: {arg}", "system")
             else:
                 self.add_message("system", str(result.get("error")), "error")

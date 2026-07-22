@@ -1,7 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('hoya', {
+  serverConnection: () => ipcRenderer.invoke('hoya:server-connection'),
   serverUrl: () => ipcRenderer.invoke('hoya:server-url'),
+  onServerConnectionChanged: (callback) => {
+    const listener = (_event, connection) => callback(connection)
+    ipcRenderer.on('hoya:server-connection-changed', listener)
+    return () => ipcRenderer.removeListener('hoya:server-connection-changed', listener)
+  },
   getAppVersion: () => ipcRenderer.invoke('hoya:get-app-version'),
   checkForUpdates: () => ipcRenderer.invoke('hoya:check-for-updates'),
   installUpdate: () => ipcRenderer.invoke('hoya:install-update'),
@@ -12,6 +18,9 @@ contextBridge.exposeInMainWorld('hoya', {
   },
   getLanguage: () => ipcRenderer.invoke('hoya:get-language'),
   setLanguage: (language) => ipcRenderer.invoke('hoya:set-language', language),
+  getApiKey: (payload) => ipcRenderer.invoke('hoya:get-api-key', payload),
+  saveApiKey: (payload) => ipcRenderer.invoke('hoya:save-api-key', payload),
+  deleteApiKey: (payload) => ipcRenderer.invoke('hoya:delete-api-key', payload),
   getSavedApiKey: (workspace) => ipcRenderer.invoke('hoya:get-saved-api-key', workspace),
   terminalRun: (payload) => ipcRenderer.invoke('hoya:terminal-run', payload),
   terminalStop: (id) => ipcRenderer.invoke('hoya:terminal-stop', id),

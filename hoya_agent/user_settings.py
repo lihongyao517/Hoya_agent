@@ -2,20 +2,43 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from .config import normalize_provider, normalize_reasoning_effort
+from .state_paths import app_data_dir
+
+
+SETTINGS_SCHEMA_VERSION = 1
+_SETTINGS_LOCK = threading.RLock()
+
+
+def _synchronized(method):
+    @wraps(method)
+    def wrapped(*args, **kwargs):
+        with _SETTINGS_LOCK:
+            return method(*args, **kwargs)
+
+    return wrapped
+
+
+def _default_settings() -> dict[str, Any]:
+    return {
+        "schema_version": SETTINGS_SCHEMA_VERSION,
+        "models": [],
+        "active_model_id": "",
+        "last_workspace": "",
+        "projects": [],
+    }
 
 
 def default_settings_path() -> Path:
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / "Hoya Agent" / "settings.json"
-    return Path.home() / ".hoya_agent" / "settings.json"
+    return app_data_dir() / "settings.json"
 
 
 @dataclass
@@ -23,27 +46,46 @@ class UserSettingsStore:
     path: Path
 
     def load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {"models": [], "active_model_id": "", "last_workspace": "", "projects": []}
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return {"models": [], "active_model_id": "", "last_workspace": "", "projects": []}
-        if not isinstance(data, dict):
-            return {"models": [], "active_model_id": "", "last_workspace": "", "projects": []}
-        data.setdefault("models", [])
-        data.setdefault("active_model_id", "")
-        data.setdefault("last_workspace", "")
-        data.setdefault("projects", [])
-        return data
+        with _SETTINGS_LOCK:
+            if not self.path.exists():
+                return _default_settings()
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return _default_settings()
+            if not isinstance(data, dict):
+                return _default_settings()
+            data.setdefault("schema_version", SETTINGS_SCHEMA_VERSION)
+            data.setdefault("models", [])
+            data.setdefault("active_model_id", "")
+            data.setdefault("last_workspace", "")
+            data.setdefault("projects", [])
+            secret_removed = False
+            for model in data["models"]:
+                if isinstance(model, dict) and "api_key" in model:
+                    model["api_key_set"] = bool(str(model.pop("api_key", "")).strip())
+                    secret_removed = True
+            if secret_removed:
+                self.save(data)
+            return data
 
     def save(self, data: dict[str, Any]) -> dict[str, Any]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return data
+        with _SETTINGS_LOCK:
+            data["schema_version"] = SETTINGS_SCHEMA_VERSION
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self.path)
+            return data
 
     def list_models(self) -> list[dict[str, Any]]:
         return [item for item in self.load().get("models", []) if isinstance(item, dict)]
+
+    def get_model(self, model_id: str) -> dict[str, Any]:
+        for model in self.list_models():
+            if str(model.get("id", "")) == model_id:
+                return model
+        raise KeyError(f"model preset not found: {model_id}")
 
     def list_projects(self, *, include_archived: bool = False) -> list[dict[str, Any]]:
         projects = [
@@ -53,6 +95,7 @@ class UserSettingsStore:
         ]
         return sorted(projects, key=lambda item: item.get("updated_at", ""), reverse=True)
 
+    @_synchronized
     def remember_project(self, project_path: Path, name: str | None = None) -> dict[str, Any]:
         data = self.load()
         projects = self.list_projects(include_archived=True)
@@ -83,6 +126,7 @@ class UserSettingsStore:
         self.save(data)
         return selected
 
+    @_synchronized
     def select_project(self, project_path: Path) -> dict[str, Any]:
         data = self.load()
         resolved = project_path.expanduser().resolve()
@@ -99,6 +143,7 @@ class UserSettingsStore:
         self.save(data)
         return selected
 
+    @_synchronized
     def update_project(
         self,
         project_id: str,
@@ -121,6 +166,7 @@ class UserSettingsStore:
             return project
         raise KeyError(f"project not found: {project_id}")
 
+    @_synchronized
     def remove_project(self, project_id: str) -> None:
         data = self.load()
         projects = self.list_projects(include_archived=True)
@@ -138,6 +184,7 @@ class UserSettingsStore:
                 return project
         raise KeyError(f"project not found: {project_id}")
 
+    @_synchronized
     def upsert_model(self, model: dict[str, Any]) -> dict[str, Any]:
         data = self.load()
         models = self.list_models()
@@ -148,7 +195,7 @@ class UserSettingsStore:
             "provider": normalize_provider(str(model.get("provider") or "openai-compatible")),
             "base_url": str(model.get("base_url") or ""),
             "model": str(model.get("model") or ""),
-            "api_key": str(model.get("api_key") or ""),
+            "api_key_set": bool(model.get("api_key_set") or str(model.get("api_key") or "").strip()),
             "wire_api": str(model.get("wire_api") or "chat"),
             "reasoning_effort": normalize_reasoning_effort(str(model.get("reasoning_effort") or "medium")),
             "show_reasoning": bool(model.get("show_reasoning", True)),
@@ -166,6 +213,7 @@ class UserSettingsStore:
         self.save(data)
         return clean
 
+    @_synchronized
     def delete_model(self, model_id: str) -> None:
         data = self.load()
         data["models"] = [item for item in self.list_models() if item.get("id") != model_id]
@@ -173,6 +221,7 @@ class UserSettingsStore:
             data["active_model_id"] = ""
         self.save(data)
 
+    @_synchronized
     def select_model(self, model_id: str) -> dict[str, Any]:
         data = self.load()
         for model in self.list_models():
