@@ -1,6 +1,7 @@
 {
   "name": "hoya-agent-desktop",
-  "version": "1.2.2",
+  "productName": "Hoya Agent",
+  "version": "1.3.0",
   "description": "Local AI workspace agent for Windows",
   "author": "lihongyao517",
   "license": "MIT",
@@ -14,34 +15,56 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build:backend": "powershell -NoProfile -ExecutionPolicy Bypass -File ../build_backend.ps1",
-    "build:renderer": "vue-tsc --noEmit && vite build",
+    "build:renderer": "tsc --noEmit && vite build",
     "test:electron": "node --test tests/*.test.cjs",
     "test": "npm run test:electron",
     "build": "npm run build:renderer",
     "pack": "npm run build:renderer && electron-builder --dir",
     "clean:old-artifacts": "node scripts/clean-old-artifacts.cjs",
     "dist": "npm run build:renderer && electron-builder && npm run clean:old-artifacts",
-    "dist:full": "npm run build:backend && npm run dist",
-    "release:prepare": "npm run dist:full && npm run verify:update-artifacts",
-    "verify:update-artifacts": "node scripts/validate-update-artifacts.cjs",
+    "dist:full": "npm run dist",
+    "release:prepare": "npm run dist:full && node scripts/validate-update-artifacts.cjs",
     "start": "electron ."
   },
   "dependencies": {
-    "electron-updater": "^6.8.9"
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "@gsap/react": "^2.1.2",
+    "@tanstack/react-virtual": "^3.14.3",
+    "electron-updater": "^6.8.9",
+    "gsap": "^3.15.0",
+    "highlight.js": "^11.10.0",
+    "katex": "^0.17.0",
+    "lucide-react": "^1.21.0",
+    "mermaid": "^11.16.0",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.0",
+    "remark-math": "^6.0.0",
+    "svg-pan-zoom": "^3.6.2",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
-    "@element-plus/icons-vue": "^2.3.2",
-    "@vitejs/plugin-vue": "^6.0.8",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
     "concurrently": "^9.0.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
-    "element-plus": "^2.14.3",
-    "typescript": "^5.0.0",
-    "vite": "^7.0.0",
-    "vue": "^3.5.40",
-    "vue-tsc": "^3.3.7",
+    "jsdom": "^29.1.1",
+    "terser": "^5.48.0",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
     "wait-on": "^8.0.0",
     "yaml": "^2.9.0"
+  },
+  "overrides": {
+    "mdast-util-gfm-autolink-literal": "2.0.0"
   },
   "build": {
     "appId": "com.hoya.agent.desktop",
@@ -62,15 +85,6 @@
       "en-US",
       "zh-CN"
     ],
-    "extraResources": [
-      {
-        "from": "../artifacts/backend",
-        "to": "backend",
-        "filter": [
-          "**/*"
-        ]
-      }
-    ],
     "publish": [
       {
         "provider": "github",
@@ -84,11 +98,14 @@
         "nsis",
         "portable"
       ],
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "executableName": "Hoya Agent"
     },
     "icon": "assets/icon.png",
     "nsis": {
       "artifactName": "Hoya-Agent-Setup-${version}-${arch}.${ext}",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
@@ -97,7 +114,7 @@
       "shortcutName": "Hoya Agent"
     },
     "portable": {
-      "artifactName": "Hoya-Agent-Portable-${version}-${arch}.${ext}"
+      "artifactName": "Hoya-Agent-Portable-Run-${version}-${arch}.${ext}"
     }
   }
 }

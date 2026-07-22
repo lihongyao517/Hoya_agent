@@ -1,6 +1,11 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('hoya', {
+  invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
+  on: (channel, listener) => {
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
   serverConnection: () => ipcRenderer.invoke('hoya:server-connection'),
   serverUrl: () => ipcRenderer.invoke('hoya:server-url'),
   onServerConnectionChanged: (callback) => {

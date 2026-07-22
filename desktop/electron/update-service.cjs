@@ -36,18 +36,22 @@ async function checkForUpdates(currentVersion, fetchImpl = globalThis.fetch) {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 12000)
   try {
-    const response = await fetchImpl(LATEST_RELEASE_URL, {
-      redirect: 'follow',
+    const response = await fetchImpl('https://api.github.com/repos/lihongyao517/Hoya_agent/tags', {
       headers: {
-        Accept: 'text/html',
+        Accept: 'application/vnd.github.v3+json',
         'User-Agent': `Hoya-Agent/${currentVersion}`,
       },
       signal: controller.signal,
     })
-    if (!response.ok) throw new Error(`GitHub Releases returned HTTP ${response.status}`)
-    const location = response.url || response.headers?.get?.('location') || ''
-    const latestTag = releaseTagFromUrl(location)
-    if (!latestTag) throw new Error('GitHub did not redirect to a published version release.')
+    if (!response.ok) throw new Error(`GitHub API returned HTTP ${response.status}`)
+    const tags = await response.json()
+    let latestTag = currentVersion
+    for (const t of tags) {
+      if (t.name && compareVersions(t.name, latestTag) > 0) {
+        latestTag = t.name
+      }
+    }
+    
     return {
       ok: true,
       currentVersion,

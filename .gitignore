@@ -44,3 +44,7 @@ local_ai_study_assistant/data/index.json
 local_ai_study_assistant/data/uploads/*
 !local_ai_study_assistant/data/uploads/.gitkeep
 local_ai_study_assistant/server.*.log
+ 
+node_modules/
+.agent-memory-store/
+

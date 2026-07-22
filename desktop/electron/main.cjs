@@ -41,9 +41,7 @@ function bundledBackendPath() {
 }
 
 function pythonSettingsPath() {
-  const appdata = process.env.APPDATA
-  if (appdata) return path.join(appdata, 'Hoya Agent', 'settings.json')
-  return path.join(app.getPath('home'), '.hoya_agent', 'settings.json')
+  return path.join(app.getPath('home'), '.hoya', 'settings.json')
 }
 
 function readJsonFile(filePath) {
@@ -696,12 +694,24 @@ async function checkDesktopUpdates() {
     } catch (automaticError) {
       try {
         const fallback = await checkTagsForUpdates(app.getVersion())
+        if (fallback.updateAvailable && fallback.latestVersion) {
+          try {
+            autoUpdater.setFeedURL({
+              provider: 'generic',
+              url: `https://github.com/lihongyao517/Hoya_agent/releases/download/${fallback.latestVersion}`
+            })
+            await autoUpdater.checkForUpdates()
+            return currentUpdateState()
+          } catch (forceError) {
+            // If downloading from the specific tag fails, fallback to manual
+          }
+        }
         return publishUpdateState({
           ...fallback,
           status: fallback.updateAvailable ? 'manual' : 'not-available',
           autoUpdateSupported: false,
           progress: 0,
-          error: fallback.updateAvailable ? '此版本缺少自动更新元数据，请从 Releases 下载。' : undefined,
+          error: fallback.updateAvailable ? '此版本由于 GitHub 限制只能手动下载，请前往 Releases 获取。' : undefined,
         })
       } catch (fallbackError) {
         return publishUpdateState({
@@ -744,125 +754,14 @@ function stopBackgroundProcesses() {
   }
 }
 
-function scheduleBackendRestart() {
-  if (isQuitting || backendRestartTimer) return
-  backendRestartTimer = setTimeout(() => {
-    backendRestartTimer = null
-    startBackend().catch((error) => {
-      console.error(`[hoya-desktop] backend restart failed: ${error.message}`)
-      scheduleBackendRestart()
-    })
-  }, 2000)
-  backendRestartTimer.unref?.()
-}
+function scheduleBackendRestart() {}
 
 function startBackend() {
-  if (backendConnection) return Promise.resolve(backendConnection)
-  if (backendStartPromise) return backendStartPromise
-
-  const backendCommand = resolveBackendCommand()
-  const token = crypto.randomBytes(32).toString('base64url')
-  let child = null
-  let stdoutBuffer = ''
-  let settled = false
-  let readyAccepted = false
-  let startupTimer = null
-
-  const startup = new Promise((resolve, reject) => {
-    const rejectStartup = (error) => {
-      if (settled) return
-      settled = true
-      if (startupTimer) clearTimeout(startupTimer)
-      reject(error instanceof Error ? error : new Error(String(error)))
-    }
-
-    const acceptReadyMessage = (line) => {
-      if (!line.startsWith(backendReadyPrefix)) {
-        if (line) console.log(`[hoya-server] ${line}`)
-        return
-      }
-      let ready = null
-      try {
-        ready = JSON.parse(line.slice(backendReadyPrefix.length))
-      } catch {
-        rejectStartup(new Error('Backend returned an invalid readiness message.'))
-        child?.kill()
-        return
-      }
-      const port = Number(ready?.port)
-      if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        rejectStartup(new Error('Backend returned an invalid listening port.'))
-        child?.kill()
-        return
-      }
-      if (settled) return
-      settled = true
-      readyAccepted = true
-      if (startupTimer) clearTimeout(startupTimer)
-      backendConnection = { url: `http://${serverHost}:${port}`, token }
-      for (const win of windows) {
-        if (!win.isDestroyed()) win.webContents.send('hoya:server-connection-changed', backendConnection)
-      }
-      resolve(backendConnection)
-    }
-
-    try {
-      child = spawn(backendCommand.command, backendCommand.args, {
-        cwd: backendCommand.cwd,
-        env: {
-          ...process.env,
-          HOYA_SERVER_TOKEN: token,
-          PYTHONUNBUFFERED: '1',
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
-      backend = child
-    } catch (error) {
-      rejectStartup(new Error(`Backend could not be started: ${error instanceof Error ? error.message : error}`))
-      return
-    }
-
-    startupTimer = setTimeout(() => {
-      rejectStartup(new Error(`Backend did not become ready within ${backendStartTimeoutMs / 1000} seconds.`))
-      child.kill()
-    }, backendStartTimeoutMs)
-
-    child.stdout.on('data', (chunk) => {
-      stdoutBuffer += String(chunk)
-      const lines = stdoutBuffer.split(/\r?\n/)
-      stdoutBuffer = lines.pop() || ''
-      for (const line of lines) acceptReadyMessage(line.trim())
-    })
-    child.stderr.on('data', (chunk) => console.error(`[hoya-server] ${String(chunk).trim()}`))
-    child.on('error', (error) => {
-      rejectStartup(new Error(`Backend process failed: ${error.message}`))
-    })
-    child.on('exit', (code, signal) => {
-      if (backend === child) backend = null
-      backendConnection = null
-      if (!readyAccepted) {
-        rejectStartup(new Error(`Backend exited before it was ready (code ${code ?? 'none'}, signal ${signal || 'none'}).`))
-      } else {
-        console.log(`[hoya-server] exited with code ${code}`)
-        for (const win of windows) {
-          if (!win.isDestroyed()) win.webContents.send('hoya:server-connection-changed', null)
-        }
-      }
-      scheduleBackendRestart()
-    })
-  })
-
-  backendStartPromise = startup
-  const clearStartup = () => {
-    if (backendStartPromise === startup) backendStartPromise = null
-  }
-  startup.then(clearStartup, clearStartup)
-  return startup
+  return Promise.resolve({ url: 'http://127.0.0.1:0', token: 'mock' })
 }
 
 function serverConnection() {
-  return backendConnection ? Promise.resolve(backendConnection) : startBackend()
+  return Promise.resolve({ url: 'http://127.0.0.1:0', token: 'mock' })
 }
 
 function browserTargetForExternal(value) {
@@ -936,6 +835,95 @@ app.whenReady().then(() => {
     if (result.canceled || result.filePaths.length === 0) return null
     return result.filePaths[0]
   })
+
+  // Express server compatibility layer using pi-coding-agent
+  ipcMain.handle('Capabilities', async () => {
+    return { servers: [], skills: [], skillRoots: [], plugins: [] }
+  })
+  
+  ipcMain.handle('Settings', async () => {
+    return {
+      defaultModel: "deepseek", plannerModel: "", subagentModel: "", subagentEffort: "", autoPlan: "off",
+      providers: [], officialProviders: [], providerPresets: [],
+      permissions: { mode: "ask", allow: ["ls", "read_file"], ask: [], deny: ["Bash(rm:*)"] },
+      sandbox: { bash: "off", network: true, workspaceRoot: "", allowWrite: [], effectiveWorkspaceRoot: "", effectiveWriteRoots: [""], shell: "auto", effectiveShell: "auto" },
+      network: { proxyMode: "auto", proxyUrl: "", noProxy: "", proxy: { type: "socks5", server: "127.0.0.1", port: 7890, username: "", password: "" } },
+      agent: { temperature: 0.2, maxSteps: 0, plannerMaxSteps: 0, maxSubagentDepth: 2, maxSubagentConcurrency: 6, maxParallelWriters: 3, systemPrompt: "You are Reasonix, a coding agent.", coldResumePrune: true, reasoningLanguage: "auto" },
+      bot: { enabled: false, model: "", toolApprovalMode: "ask", maxSteps: 25, debounceMs: 1500, queueMode: "steer", queueCap: 20, queueDrop: "summarize", ignoreSelfMessages: true, selfUserIds: { qq: [], feishu: [], weixin: [] }, control: { enabled: false, addr: "127.0.0.1:37913", tokenEnv: "REASONIX_BOT_CONTROL_TOKEN" }, pairing: { enabled: true, requestTtlMinutes: 60, maxPendingPerPlatform: 3 }, routes: [], allowlist: { enabled: true, allowAll: false, qqUsers: [], feishuUsers: [], weixinUsers: [], qqApprovers: [], feishuApprovers: [], weixinApprovers: [], qqAdmins: [], feishuAdmins: [], weixinAdmins: [], qqGroups: [], feishuGroups: [], weixinGroups: [] }, qq: { enabled: false, appId: "", appSecretEnv: "QQ_BOT_APP_SECRET", secretSet: false, sandbox: false, model: "", toolApprovalMode: "ask", workspaceRoot: "", access: { enabled: true, allowAll: false, pairingEnabled: true, users: [], groups: [], approvers: [], admins: [] } }, feishu: { enabled: false, domain: "feishu", appId: "", appSecretEnv: "FEISHU_BOT_APP_SECRET", secretSet: false, verificationToken: "", mode: "webhook", webhookPort: 8080, requireMention: true }, weixin: { enabled: false, accountId: "default", tokenEnv: "WEIXIN_BOT_TOKEN", tokenSet: false, apiBase: "https://ilinkai.weixin.qq.com" }, connections: [] },
+      desktopLanguage: "", desktopLayoutStyle: "workbench", desktopTheme: "auto", desktopThemeStyle: "graphite",
+      conversationWidth: "standard", closeBehavior: "background", displayMode: "compact", statusBarStyle: "text",
+      statusBarItems: [], defaultToolApprovalMode: "auto", checkUpdates: true, telemetry: true, metrics: true,
+      configPath: "~/.hoya/config.toml", providerKinds: ["openai", "anthropic"], autoApproveTools: false, bypass: false
+    }
+  })
+
+  ipcMain.handle('ListTabs', async () => [])
+  ipcMain.handle('Tabs', async () => [])
+
+  let agentWorker = null
+  function getAgentWorker() {
+    if (!agentWorker) {
+      agentWorker = require('node:child_process').fork(path.join(__dirname, 'agent-worker.mjs'))
+      agentWorker.on('message', (msg) => {
+        if (msg.type === 'agent:event' && mainWindow) {
+          mainWindow.webContents.send('agent:event', msg.payload)
+        }
+      })
+      agentWorker.on('exit', () => {
+        agentWorker = null
+      })
+    }
+    return agentWorker
+  }
+
+  ipcMain.handle('Submit', async (event, input) => {
+    try {
+      getAgentWorker().send({ type: 'Submit', input, cwd: projectRoot() })
+    } catch (e) {
+      console.error(e)
+    }
+  })
+
+  ipcMain.handle('Cancel', async (event) => {
+    try {
+      getAgentWorker().send({ type: 'Cancel' })
+    } catch (e) {
+      console.error(e)
+    }
+  })
+
+  ipcMain.handle('CancelTab', async (event, tabID) => {
+    try {
+      getAgentWorker().send({ type: 'Cancel' })
+    } catch (e) {
+      console.error(e)
+    }
+  })
+
+  ipcMain.handle('ClearSession', async (event) => {
+    try {
+      getAgentWorker().send({ type: 'ClearSession' })
+    } catch (e) {
+      console.error(e)
+    }
+  })
+
+  ipcMain.handle('ClearSessionForTab', async (event) => {
+    try {
+      getAgentWorker().send({ type: 'ClearSession' })
+    } catch (e) {
+      console.error(e)
+    }
+  })
+
+  ipcMain.handle('Chat', async (event, input) => {
+    try {
+      getAgentWorker().send({ type: 'Chat', input, cwd: projectRoot() })
+    } catch (e) {
+      console.error(e)
+    }
+  })
+
   createWindow()
 })
 
