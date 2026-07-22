@@ -26,7 +26,6 @@
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",
-    "electron-squirrel-startup": "^1.0.1",
     "electron-updater": "^6.8.9",
     "element-plus": "^2.14.3",
     "vue": "^3.5.40"
@@ -36,7 +35,6 @@
     "concurrently": "^9.0.0",
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0",
-    "electron-builder-squirrel-windows": "^25.1.8",
     "typescript": "^5.0.0",
     "vite": "^7.0.0",
     "vue-tsc": "^3.3.7",
@@ -75,8 +73,7 @@
     "win": {
       "target": [
         "nsis",
-        "portable",
-        "squirrel"
+        "portable"
       ],
       "icon": "assets/icon.ico",
       "signAndEditExecutable": false
@@ -93,11 +90,6 @@
     },
     "portable": {
       "artifactName": "Hoya-Agent-Portable-${version}-${arch}.${ext}"
-    },
-    "squirrelWindows": {
-      "name": "HoyaAgent",
-      "artifactName": "Hoya-Agent-${version}-win32-${arch}-Setup.${ext}",
-      "iconUrl": "https://raw.githubusercontent.com/lihongyao517/Hoya_agent/main/desktop/assets/icon.ico"
     }
   }
 }

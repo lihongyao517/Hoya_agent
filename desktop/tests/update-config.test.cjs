@@ -10,9 +10,7 @@ test('packages the updater and publishes GitHub update metadata', () => {
     repo: 'Hoya_agent',
     releaseType: 'release',
   }])
-  assert.ok(packageJson.build.win.target.includes('nsis'))
-  assert.ok(packageJson.build.win.target.includes('squirrel'))
+  assert.deepEqual(packageJson.build.win.target, ['nsis', 'portable'])
   assert.equal(packageJson.repository.url, 'https://github.com/lihongyao517/Hoya_agent.git')
-  assert.match(packageJson.build.squirrelWindows.artifactName, /win32-\$\{arch\}/)
   assert.match(packageJson.scripts['release:github'], /--publish always/)
 })

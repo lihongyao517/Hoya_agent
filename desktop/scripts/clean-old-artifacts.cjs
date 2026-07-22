@@ -4,10 +4,6 @@ const { version: currentVersion } = require('../package.json')
 
 const artifactsDir = path.resolve(__dirname, '..', '..', 'artifacts', 'desktop')
 const rootArtifactPattern = /^Hoya-Agent-(?:Setup|Portable)-(.+)-(?:x64|ia32|arm64)\.exe(?:\.blockmap)?$/i
-const squirrelArtifactPatterns = [
-  /^Hoya-Agent-(.+)-win32-(?:x64|ia32|arm64)-Setup\.exe$/i,
-  /^HoyaAgent-(.+)-(?:full|delta)\.nupkg$/i,
-]
 
 if (!fs.existsSync(artifactsDir)) {
   console.log(`[hoya-desktop] artifact directory does not exist: ${artifactsDir}`)
@@ -28,7 +24,15 @@ function removeOldFiles(directory, patterns) {
 }
 
 removeOldFiles(artifactsDir, [rootArtifactPattern])
-removeOldFiles(path.join(artifactsDir, 'squirrel-windows'), squirrelArtifactPatterns)
+
+const retiredSquirrelDir = path.join(artifactsDir, 'squirrel-windows')
+if (fs.existsSync(retiredSquirrelDir)) {
+  for (const entry of fs.readdirSync(retiredSquirrelDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue
+    fs.unlinkSync(path.join(retiredSquirrelDir, entry.name))
+    removed.push(path.join('squirrel-windows', entry.name))
+  }
+}
 
 const latestMetadata = path.join(artifactsDir, 'latest.yml')
 if (fs.existsSync(latestMetadata)) {

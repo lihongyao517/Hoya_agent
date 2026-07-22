@@ -1,20 +1,12 @@
-const { app, autoUpdater: squirrelAutoUpdater, BrowserWindow, clipboard, dialog, ipcMain, Menu, Tray, shell } = require('electron')
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Tray, shell } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
 const { spawn } = require('node:child_process')
-const { autoUpdater: nsisAutoUpdater } = require('electron-updater')
+const { autoUpdater } = require('electron-updater')
 const { RELEASES_URL, checkForUpdates: checkTagsForUpdates } = require('./update-service.cjs')
-const { electronPublicUpdateFeed, isSquirrelInstall, releaseVersion, squirrelAppUserModelId } = require('./updater-adapter.cjs')
-
-const handlingSquirrelStartupEvent = require('electron-squirrel-startup')
-if (handlingSquirrelStartupEvent) app.quit()
 
 const isDev = !app.isPackaged
-const usesSquirrelUpdater = app.isPackaged && process.platform === 'win32' && isSquirrelInstall(process.execPath)
-const autoUpdater = usesSquirrelUpdater ? squirrelAutoUpdater : nsisAutoUpdater
-if (process.platform === 'win32') {
-  app.setAppUserModelId(usesSquirrelUpdater ? squirrelAppUserModelId() : 'com.hoya.agent.desktop')
-}
+if (process.platform === 'win32') app.setAppUserModelId('com.hoya.agent.desktop')
 const serverHost = '127.0.0.1'
 const serverPort = process.env.HOYA_SERVER_PORT || '8787'
 const supportedLanguages = new Set(['zh-CN', 'en-US'])
@@ -421,35 +413,29 @@ function publishUpdateState(patch) {
 
 function configureAutoUpdater() {
   if (!app.isPackaged) return
-  if (usesSquirrelUpdater) {
-    autoUpdater.setFeedURL({ url: electronPublicUpdateFeed(app.getVersion()) })
-  } else {
-    autoUpdater.autoDownload = true
-    autoUpdater.autoInstallOnAppQuit = true
-    autoUpdater.autoRunAppAfterInstall = true
-    autoUpdater.allowPrerelease = false
-  }
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.autoRunAppAfterInstall = true
+  autoUpdater.allowPrerelease = false
 
   autoUpdater.on('checking-for-update', () => publishUpdateState({ ok: true, status: 'checking', error: undefined }))
   autoUpdater.on('update-available', (info) => publishUpdateState({
     ok: true,
     status: 'downloading',
-    latestVersion: releaseVersion(info, '', currentUpdateState().latestVersion),
+    latestVersion: info.version || currentUpdateState().latestVersion,
     updateAvailable: true,
     autoUpdateSupported: true,
-    progress: usesSquirrelUpdater ? 25 : 0,
+    progress: 0,
     error: undefined,
   }))
-  if (!usesSquirrelUpdater) {
-    autoUpdater.on('download-progress', (progress) => publishUpdateState({
-      status: 'downloading',
-      progress: Math.max(0, Math.min(100, Math.round(progress.percent || 0))),
-    }))
-  }
-  autoUpdater.on('update-downloaded', (info, _releaseNotes, releaseName) => publishUpdateState({
+  autoUpdater.on('download-progress', (progress) => publishUpdateState({
+    status: 'downloading',
+    progress: Math.max(0, Math.min(100, Math.round(progress.percent || 0))),
+  }))
+  autoUpdater.on('update-downloaded', (info) => publishUpdateState({
     ok: true,
     status: 'downloaded',
-    latestVersion: releaseVersion(info, releaseName, currentUpdateState().latestVersion),
+    latestVersion: info.version || currentUpdateState().latestVersion,
     updateAvailable: true,
     autoUpdateSupported: true,
     progress: 100,
@@ -458,7 +444,7 @@ function configureAutoUpdater() {
   autoUpdater.on('update-not-available', (info) => publishUpdateState({
     ok: true,
     status: 'not-available',
-    latestVersion: releaseVersion(info, '', app.getVersion()),
+    latestVersion: info.version || app.getVersion(),
     updateAvailable: false,
     autoUpdateSupported: true,
     progress: 0,
@@ -489,20 +475,6 @@ async function checkDesktopUpdates() {
       return publishUpdateState({ ok: true, status: 'not-available', latestVersion: app.getVersion(), updateAvailable: false, autoUpdateSupported: false })
     }
     try {
-      if (usesSquirrelUpdater) {
-        try {
-          const tagState = await checkTagsForUpdates(app.getVersion())
-          publishUpdateState({
-            ...tagState,
-            status: 'checking',
-            autoUpdateSupported: true,
-            progress: 0,
-            error: undefined,
-          })
-        } catch {
-          publishUpdateState({ status: 'checking', autoUpdateSupported: true, progress: 0, error: undefined })
-        }
-      }
       await autoUpdater.checkForUpdates()
       return currentUpdateState()
     } catch (automaticError) {
@@ -538,8 +510,7 @@ function installDownloadedUpdate() {
   updateInstallInProgress = true
   isQuitting = true
   stopBackgroundProcesses()
-  if (usesSquirrelUpdater) autoUpdater.quitAndInstall()
-  else autoUpdater.quitAndInstall(false, true)
+  autoUpdater.quitAndInstall(false, true)
   return true
 }
 

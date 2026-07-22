@@ -1,0 +1,70 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $version = (Get-Content desktop/package.json | ConvertFrom-Json).version
+          if ("${{ github.ref_type }}" -ne "tag") {
+            throw "Run this workflow from the existing v$version tag, not from a branch."
+          }
+          if ("${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} does not match desktop package version v$version."
+          }
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          npm ci --prefix desktop
+
+      - name: Build Windows packages
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File build_backend.ps1
+          npm run build:renderer --prefix desktop
+          npx --prefix desktop electron-builder --win nsis portable --x64 --publish never
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $assets = @(
+            "artifacts/desktop/Hoya-Agent-Setup-$env:VERSION-x64.exe",
+            "artifacts/desktop/Hoya-Agent-Setup-$env:VERSION-x64.exe.blockmap",
+            "artifacts/desktop/Hoya-Agent-Portable-$env:VERSION-x64.exe",
+            "artifacts/desktop/latest.yml"
+          )
+          foreach ($asset in $assets) {
+            if (-not (Test-Path $asset)) { throw "Missing release asset: $asset" }
+          }
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $assets --clobber
+          } else {
+            gh release create $tag $assets --verify-tag --generate-notes --title "Hoya Agent $env:VERSION"
+          }
