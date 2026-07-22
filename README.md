@@ -639,5 +639,5 @@ python -m pip install -r requirements.txt
 - 本项目使用 [MIT License](LICENSE)。
 - 数据处理与联网行为见 [隐私政策](PRIVACY.md)。
 - Windows 客户端通过 GitHub Releases 获取版本信息、更新元数据和安装包；检测到新版本后在后台下载，并在退出或用户确认后完成安装。
-- Windows 正式版本通过 SignPath Foundation 提供的免费开源证书签名，签名流程见 [代码签名政策](CODE_SIGNING_POLICY.md)。
-- Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+- Windows 代码签名正在申请 SignPath Foundation 免费开源证书；批准前的过渡版本暂未签名，流程见 [代码签名政策](CODE_SIGNING_POLICY.md)。
+- Code signing is planned with [SignPath.io](https://signpath.io/) and a certificate from the [SignPath Foundation](https://signpath.org/).

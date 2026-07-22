@@ -2,8 +2,9 @@
 
 ## Free open-source code signing
 
-Free code signing is provided by [SignPath.io](https://signpath.io/), with a
-certificate provided by the [SignPath Foundation](https://signpath.org/).
+Free code signing is planned with [SignPath.io](https://signpath.io/), with a
+certificate provided by the [SignPath Foundation](https://signpath.org/). The
+application is currently pending approval.
 
 Only release artifacts built from this public repository by the configured
 GitHub Actions workflow are eligible for signing. Signing credentials are kept
@@ -18,7 +19,8 @@ repository or distributed to maintainers.
 - SignPath submitter: the GitHub Actions trusted build integration
 
 The project owner reviews changes, creates release tags, and approves release
-signing requests. Every production release requires manual SignPath approval.
+signing requests. Once SignPath is enabled, every signed production release
+requires manual SignPath approval.
 
 ## Release process
 
@@ -31,7 +33,9 @@ signing requests. Every production release requires manual SignPath approval.
    installer, verifies Authenticode signatures, and publishes the release to
    GitHub Releases.
 
-Unsigned artifacts must not be attached to an official GitHub Release.
+Releases published before SignPath approval are explicitly transitional and
+unsigned. After the production signing policy is enabled, unsigned artifacts
+must not be attached to an official GitHub Release.
 
 ## Reporting compromised releases
 

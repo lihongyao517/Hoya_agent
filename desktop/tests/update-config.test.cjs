@@ -17,11 +17,11 @@ test('packages the updater and publishes GitHub update metadata', () => {
   assert.match(packageJson.scripts['release:github'], /--publish always/)
 })
 
-test('builds and signs releases from the desktop working directory', () => {
+test('builds unsigned GitHub releases from the desktop working directory', () => {
   const workflow = fs.readFileSync(path.resolve(__dirname, '../../.github/workflows/release.yml'), 'utf8')
-  assert.match(workflow, /uses: signpath\/github-action-submit-signing-request@v2/)
   assert.match(workflow, /working-directory: desktop/)
-  assert.match(workflow, /npx electron-builder --dir --win --x64/)
+  assert.match(workflow, /npx electron-builder --win nsis portable --x64/)
   assert.doesNotMatch(workflow, /npx --prefix desktop electron-builder/)
+  assert.doesNotMatch(workflow, /signpath\/github-action|SIGNPATH_API_TOKEN/)
   assert.doesNotMatch(workflow, /update\.electronjs\.org|\bsquirrel\b/i)
 })

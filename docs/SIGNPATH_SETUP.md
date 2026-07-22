@@ -4,6 +4,11 @@ Hoya Agent uses SignPath only for Windows code signing. GitHub Releases remains
 the sole update and download server; Squirrel and `update.electronjs.org` are
 not part of this release process.
 
+Until the SignPath Foundation application is approved, `.github/workflows/release.yml`
+publishes transitional unsigned releases. Restore the two SignPath signing
+stages from the repository history only after all credentials and artifact
+configuration slugs are available.
+
 ## 1. Apply
 
 Apply at <https://signpath.org/apply> with these project details:
