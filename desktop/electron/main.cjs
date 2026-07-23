@@ -63,6 +63,326 @@ function writeJsonFileAtomic(filePath, value) {
   }
 }
 
+function agentDir() {
+  return path.join(app.getPath('home'), '.hoya')
+}
+
+function modelsConfigPath() {
+  return path.join(agentDir(), 'models.json')
+}
+
+function authConfigPath() {
+  return path.join(agentDir(), 'auth.json')
+}
+
+function desktopAgentSettingsPath() {
+  return path.join(agentDir(), 'settings.json')
+}
+
+function normalizeProviderName(value, fallback = 'custom-provider') {
+  return String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64) || fallback
+}
+
+function trimTrailingSlash(value) {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
+function uniqueStrings(values) {
+  return Array.from(new Set(values.map((value) => String(value || '').trim()).filter(Boolean)))
+}
+
+function providerRequiresKey(provider) {
+  return provider?.requiresKey !== false
+}
+
+function providerApiKind(kind) {
+  return String(kind || '').toLowerCase() === 'anthropic' ? 'anthropic-messages' : 'openai-completions'
+}
+
+function providerApiKeyEnv(provider) {
+  const explicit = String(provider?.apiKeyEnv || '').trim()
+  if (explicit) return explicit
+  const base = normalizeProviderName(provider?.name, 'custom-provider').toUpperCase().replace(/[^A-Z0-9]+/g, '_')
+  return `${base}_API_KEY`
+}
+
+function emptyBotSettings() {
+  return {
+    enabled: false,
+    model: '',
+    toolApprovalMode: 'ask',
+    maxSteps: 25,
+    debounceMs: 1500,
+    queueMode: 'steer',
+    queueCap: 20,
+    queueDrop: 'summarize',
+    ignoreSelfMessages: true,
+    selfUserIds: { qq: [], feishu: [], weixin: [] },
+    control: { enabled: false, addr: '127.0.0.1:37913', tokenEnv: 'REASONIX_BOT_CONTROL_TOKEN' },
+    pairing: { enabled: true, requestTtlMinutes: 60, maxPendingPerPlatform: 3 },
+    routes: [],
+    allowlist: {
+      enabled: true,
+      allowAll: false,
+      qqUsers: [],
+      feishuUsers: [],
+      weixinUsers: [],
+      qqApprovers: [],
+      feishuApprovers: [],
+      weixinApprovers: [],
+      qqAdmins: [],
+      feishuAdmins: [],
+      weixinAdmins: [],
+      qqGroups: [],
+      feishuGroups: [],
+      weixinGroups: [],
+    },
+    qq: { enabled: false, appId: '', appSecretEnv: 'QQ_BOT_APP_SECRET', secretSet: false, sandbox: false, model: '', toolApprovalMode: 'ask', workspaceRoot: '', access: { enabled: true, allowAll: false, pairingEnabled: true, users: [], groups: [], approvers: [], admins: [] } },
+    feishu: { enabled: false, domain: 'feishu', appId: '', appSecretEnv: 'FEISHU_BOT_APP_SECRET', secretSet: false, verificationToken: '', mode: 'webhook', webhookPort: 8080, requireMention: true },
+    weixin: { enabled: false, accountId: 'default', tokenEnv: 'WEIXIN_BOT_TOKEN', tokenSet: false, apiBase: 'https://ilinkai.weixin.qq.com' },
+    connections: [],
+  }
+}
+
+function officialProviderTemplates() {
+  return [
+    providerView({
+      name: 'deepseek',
+      builtIn: true,
+      added: false,
+      kind: 'openai',
+      baseUrl: 'https://api.deepseek.com',
+      models: ['deepseek-chat', 'deepseek-reasoner'],
+      default: 'deepseek-chat',
+      apiKeyEnv: 'DEEPSEEK_API_KEY',
+      balanceUrl: 'https://api.deepseek.com/user/balance',
+      contextWindow: 128000,
+    }),
+  ]
+}
+
+function storedApiKeyForProvider(auth, providerName, apiKeyEnv) {
+  const direct = auth[providerName]
+  if (direct?.key) return direct.key
+  if (direct?.env?.[apiKeyEnv]) return direct.env[apiKeyEnv]
+  for (const credential of Object.values(auth || {})) {
+    if (credential?.env?.[apiKeyEnv]) return credential.env[apiKeyEnv]
+  }
+  return ''
+}
+
+function providerView(input = {}, auth = readJsonFile(authConfigPath())) {
+  const name = normalizeProviderName(input.name)
+  const models = uniqueStrings(input.models || [])
+  const apiKeyEnv = providerApiKeyEnv({ ...input, name })
+  const keySet = providerRequiresKey(input) ? Boolean(storedApiKeyForProvider(auth, name, apiKeyEnv) || input.keySet) : true
+  return {
+    name,
+    builtIn: Boolean(input.builtIn),
+    added: input.added !== false,
+    kind: String(input.kind || (String(input.api || '').includes('anthropic') ? 'anthropic' : 'openai')).toLowerCase() === 'anthropic' ? 'anthropic' : 'openai',
+    baseUrl: trimTrailingSlash(input.baseUrl),
+    chatUrl: String(input.chatUrl || ''),
+    models,
+    visionModels: uniqueStrings(input.visionModels || []),
+    visionModelsConfigured: Boolean(input.visionModelsConfigured || (input.visionModels || []).length > 0),
+    modelsUrl: String(input.modelsUrl || ''),
+    default: String(input.default || models[0] || ''),
+    apiKeyEnv,
+    headers: input.headers && typeof input.headers === 'object' ? input.headers : {},
+    extraBody: input.extraBody && typeof input.extraBody === 'object' ? input.extraBody : {},
+    authHeader: Boolean(input.authHeader),
+    keySet,
+    requiresKey: input.requiresKey !== false,
+    configured: input.requiresKey === false || keySet,
+    keySource: keySet ? 'Hoya secure store' : '',
+    keySourcePath: keySet ? authConfigPath() : '',
+    balanceUrl: String(input.balanceUrl || ''),
+    contextWindow: Number(input.contextWindow) || 0,
+    reasoningProtocol: String(input.reasoningProtocol || ''),
+    thinking: String(input.thinking || ''),
+    supportedEfforts: uniqueStrings(input.supportedEfforts || []),
+    defaultEffort: String(input.defaultEffort || ''),
+    modelOverrides: Array.isArray(input.modelOverrides) ? input.modelOverrides : [],
+  }
+}
+
+function loadProviderViews() {
+  const config = readJsonFile(modelsConfigPath())
+  const auth = readJsonFile(authConfigPath())
+  const providers = Object.entries(config.providers || {}).map(([name, provider]) => providerView({
+    ...provider,
+    name,
+    added: true,
+    kind: String(provider?.api || '').includes('anthropic') ? 'anthropic' : 'openai',
+    models: (provider?.models || []).map((model) => typeof model === 'string' ? model : model?.id),
+    default: provider?.default,
+  }, auth))
+  return providers
+}
+
+function modelDefinitions(provider) {
+  return uniqueStrings(provider.models || []).map((model) => ({
+    id: model,
+    api: providerApiKind(provider.kind),
+    baseUrl: trimTrailingSlash(provider.baseUrl),
+    reasoning: provider.reasoningProtocol === 'none' ? false : undefined,
+    input: provider.visionModels?.includes(model) ? ['text', 'image'] : ['text'],
+    contextWindow: Number(provider.contextWindow) || undefined,
+  }))
+}
+
+function providerToModelsJson(provider) {
+  const headers = provider.headers && Object.keys(provider.headers).length > 0 ? provider.headers : undefined
+  const models = modelDefinitions(provider)
+  return {
+    name: provider.name,
+    baseUrl: trimTrailingSlash(provider.baseUrl),
+    apiKey: providerRequiresKey(provider) ? providerApiKeyEnv(provider).replace(/^/, '$') : undefined,
+    api: providerApiKind(provider.kind),
+    headers,
+    authHeader: provider.authHeader || undefined,
+    models,
+  }
+}
+
+function saveProviderToConfig(provider) {
+  const view = providerView(provider)
+  if (!view.name) throw new Error('Provider name is required.')
+  if (!view.baseUrl) throw new Error('Provider base URL is required.')
+  if (view.models.length === 0) throw new Error('Select at least one model before saving the provider.')
+  const config = readJsonFile(modelsConfigPath())
+  const providers = { ...(config.providers || {}) }
+  providers[view.name] = providerToModelsJson(view)
+  writeJsonFileAtomic(modelsConfigPath(), { providers })
+  return view
+}
+
+function saveStoredProviderKey(apiKeyEnv, value, providerName) {
+  const key = String(value || '').trim()
+  if (!key) throw new Error('API key is required.')
+  const envName = String(apiKeyEnv || '').trim()
+  if (!envName) throw new Error('API key environment name is required.')
+  const auth = readJsonFile(authConfigPath())
+  const providers = loadProviderViews()
+  const provider = providerName
+    ? normalizeProviderName(providerName)
+    : providers.find((item) => item.apiKeyEnv === envName)?.name || normalizeProviderName(envName.replace(/_API_KEY$/i, ''))
+  auth[provider] = { type: 'api_key', key, env: { [envName]: key } }
+  writeJsonFileAtomic(authConfigPath(), auth)
+  return provider
+}
+
+function clearStoredProviderKey(apiKeyEnv) {
+  const envName = String(apiKeyEnv || '').trim()
+  if (!envName) return
+  const auth = readJsonFile(authConfigPath())
+  for (const [provider, credential] of Object.entries(auth)) {
+    if (credential?.env?.[envName] || providerApiKeyEnv({ name: provider }) === envName) delete auth[provider]
+  }
+  writeJsonFileAtomic(authConfigPath(), auth)
+}
+
+function saveDefaultModel(ref) {
+  const settings = readJsonFile(desktopAgentSettingsPath())
+  settings.defaultModel = String(ref || '').trim()
+  writeJsonFileAtomic(desktopAgentSettingsPath(), settings)
+}
+
+function loadDefaultModel(providers) {
+  const settings = readJsonFile(desktopAgentSettingsPath())
+  const configured = String(settings.defaultModel || '').trim()
+  if (configured) return configured
+  const firstProvider = providers.find((provider) => provider.configured && provider.models.length > 0) || providers.find((provider) => provider.models.length > 0)
+  return firstProvider ? `${firstProvider.name}/${firstProvider.default || firstProvider.models[0]}` : ''
+}
+
+function settingsView() {
+  const providers = loadProviderViews()
+  const official = officialProviderTemplates().map((template) => ({
+    ...template,
+    added: providers.some((provider) => provider.name === template.name),
+  }))
+  return {
+    defaultModel: loadDefaultModel(providers),
+    plannerModel: '',
+    subagentModel: '',
+    subagentEffort: '',
+    autoPlan: 'off',
+    providers,
+    officialProviders: official,
+    providerPresets: [],
+    permissions: { mode: 'ask', allow: ['ls', 'read_file'], ask: [], deny: ['Bash(rm:*)'] },
+    sandbox: { bash: 'off', network: true, workspaceRoot: '', allowWrite: [], effectiveWorkspaceRoot: projectRoot(), effectiveWriteRoots: [projectRoot()], shell: 'auto', effectiveShell: process.platform === 'win32' ? 'cmd' : 'bash' },
+    network: { proxyMode: 'auto', proxyUrl: '', noProxy: '', proxy: { type: 'socks5', server: '127.0.0.1', port: 7890, username: '', password: '' } },
+    agent: { temperature: 0.2, maxSteps: 0, plannerMaxSteps: 0, maxSubagentDepth: 2, maxSubagentConcurrency: 6, maxParallelWriters: 3, systemPrompt: 'You are Reasonix, a coding agent.', coldResumePrune: true, reasoningLanguage: 'auto' },
+    bot: emptyBotSettings(),
+    desktopLanguage: '',
+    desktopLayoutStyle: 'workbench',
+    desktopTheme: 'auto',
+    desktopThemeStyle: 'graphite',
+    conversationWidth: 'standard',
+    closeBehavior: 'background',
+    displayMode: 'compact',
+    statusBarStyle: 'text',
+    statusBarItems: ['context', 'cost', 'git', 'model', 'mode', 'workspace'],
+    defaultToolApprovalMode: 'auto',
+    checkUpdates: true,
+    telemetry: true,
+    metrics: true,
+    configPath: desktopAgentSettingsPath(),
+    providerKinds: ['openai', 'anthropic'],
+    autoApproveTools: false,
+    bypass: false,
+  }
+}
+
+function modelInfos() {
+  const defaultRef = loadDefaultModel(loadProviderViews())
+  return loadProviderViews().flatMap((provider) => provider.models.map((model) => ({
+    provider: provider.name,
+    model,
+    ref: `${provider.name}/${model}`,
+    current: `${provider.name}/${model}` === defaultRef,
+    contextWindow: provider.contextWindow || 0,
+  })))
+}
+
+async function fetchProviderModels(provider) {
+  const view = providerView(provider)
+  const base = trimTrailingSlash(view.modelsUrl || view.baseUrl)
+  if (!base) throw new Error('Provider base URL is required before fetching models.')
+  const url = view.modelsUrl ? base : `${base.replace(/\/(?:chat\/completions|messages)$/i, '')}/models`
+  const auth = readJsonFile(authConfigPath())
+  const apiKey = storedApiKeyForProvider(auth, view.name, view.apiKeyEnv)
+  if (providerRequiresKey(view) && !apiKey) throw new Error(`No API key saved for ${view.name}.`)
+  const headers = { accept: 'application/json', ...(view.headers || {}) }
+  if (apiKey) {
+    if (view.kind === 'anthropic' && !view.authHeader) {
+      headers['x-api-key'] = apiKey
+      headers['anthropic-version'] = headers['anthropic-version'] || '2023-06-01'
+    } else {
+      headers.authorization = `Bearer ${apiKey}`
+    }
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 15000)
+  try {
+    const response = await fetch(url, { method: 'GET', headers, signal: controller.signal })
+    if (!response.ok) throw new Error(`status ${response.status} from ${url}`)
+    const body = await response.json()
+    const data = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : Array.isArray(body) ? body : []
+    return uniqueStrings(data.map((item) => typeof item === 'string' ? item : item?.id || item?.name || item?.model)).sort((a, b) => a.localeCompare(b))
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 function normalizedPath(value) {
   const resolved = path.resolve(String(value || ''))
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved
@@ -836,31 +1156,106 @@ app.whenReady().then(() => {
     return result.filePaths[0]
   })
 
-  // Express server compatibility layer using pi-coding-agent
-  ipcMain.handle('Capabilities', async () => {
-    return { servers: [], skills: [], skillRoots: [], plugins: [] }
+  // Reasonix renderer compatibility layer backed by pi-coding-agent config files.
+  ipcMain.handle('Platform', async () => process.platform === 'win32' ? 'windows' : process.platform)
+  ipcMain.handle('MinimiseMainWindow', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize())
+  ipcMain.handle('ToggleMaximiseMainWindow', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
   })
-  
-  ipcMain.handle('Settings', async () => {
-    return {
-      defaultModel: "deepseek", plannerModel: "", subagentModel: "", subagentEffort: "", autoPlan: "off",
-      providers: [], officialProviders: [], providerPresets: [],
-      permissions: { mode: "ask", allow: ["ls", "read_file"], ask: [], deny: ["Bash(rm:*)"] },
-      sandbox: { bash: "off", network: true, workspaceRoot: "", allowWrite: [], effectiveWorkspaceRoot: "", effectiveWriteRoots: [""], shell: "auto", effectiveShell: "auto" },
-      network: { proxyMode: "auto", proxyUrl: "", noProxy: "", proxy: { type: "socks5", server: "127.0.0.1", port: 7890, username: "", password: "" } },
-      agent: { temperature: 0.2, maxSteps: 0, plannerMaxSteps: 0, maxSubagentDepth: 2, maxSubagentConcurrency: 6, maxParallelWriters: 3, systemPrompt: "You are Reasonix, a coding agent.", coldResumePrune: true, reasoningLanguage: "auto" },
-      bot: { enabled: false, model: "", toolApprovalMode: "ask", maxSteps: 25, debounceMs: 1500, queueMode: "steer", queueCap: 20, queueDrop: "summarize", ignoreSelfMessages: true, selfUserIds: { qq: [], feishu: [], weixin: [] }, control: { enabled: false, addr: "127.0.0.1:37913", tokenEnv: "REASONIX_BOT_CONTROL_TOKEN" }, pairing: { enabled: true, requestTtlMinutes: 60, maxPendingPerPlatform: 3 }, routes: [], allowlist: { enabled: true, allowAll: false, qqUsers: [], feishuUsers: [], weixinUsers: [], qqApprovers: [], feishuApprovers: [], weixinApprovers: [], qqAdmins: [], feishuAdmins: [], weixinAdmins: [], qqGroups: [], feishuGroups: [], weixinGroups: [] }, qq: { enabled: false, appId: "", appSecretEnv: "QQ_BOT_APP_SECRET", secretSet: false, sandbox: false, model: "", toolApprovalMode: "ask", workspaceRoot: "", access: { enabled: true, allowAll: false, pairingEnabled: true, users: [], groups: [], approvers: [], admins: [] } }, feishu: { enabled: false, domain: "feishu", appId: "", appSecretEnv: "FEISHU_BOT_APP_SECRET", secretSet: false, verificationToken: "", mode: "webhook", webhookPort: 8080, requireMention: true }, weixin: { enabled: false, accountId: "default", tokenEnv: "WEIXIN_BOT_TOKEN", tokenSet: false, apiBase: "https://ilinkai.weixin.qq.com" }, connections: [] },
-      desktopLanguage: "", desktopLayoutStyle: "workbench", desktopTheme: "auto", desktopThemeStyle: "graphite",
-      conversationWidth: "standard", closeBehavior: "background", displayMode: "compact", statusBarStyle: "text",
-      statusBarItems: [], defaultToolApprovalMode: "auto", checkUpdates: true, telemetry: true, metrics: true,
-      configPath: "~/.hoya/config.toml", providerKinds: ["openai", "anthropic"], autoApproveTools: false, bypass: false
-    }
+  ipcMain.handle('IsMainWindowMaximised', (event) => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false)
+  ipcMain.handle('CloseMainWindow', (event) => BrowserWindow.fromWebContents(event.sender)?.close())
+  ipcMain.handle('Version', async () => app.getVersion())
+  ipcMain.handle('Capabilities', async () => ({ servers: [], skills: [], skillRoots: [], plugins: [] }))
+  ipcMain.handle('Settings', async () => settingsView())
+  ipcMain.handle('Models', async () => modelInfos())
+  ipcMain.handle('ModelsForTab', async () => modelInfos())
+  ipcMain.handle('SetModel', async (_event, name) => saveDefaultModel(name))
+  ipcMain.handle('SetModelForTab', async (_event, _tabID, name) => saveDefaultModel(name))
+  ipcMain.handle('SetDefaultModel', async (_event, ref) => {
+    saveDefaultModel(ref)
+    resetAgentWorker()
   })
-
+  ipcMain.handle('SetPlannerModel', async () => undefined)
+  ipcMain.handle('SetSubagentModel', async () => undefined)
+  ipcMain.handle('SetSubagentEffort', async () => undefined)
+  ipcMain.handle('SetMaxSubagentDepth', async () => undefined)
+  ipcMain.handle('SetMaxSubagentConcurrency', async () => undefined)
+  ipcMain.handle('SetMaxParallelWriters', async () => undefined)
+  ipcMain.handle('SetColdResumePrune', async () => undefined)
+  ipcMain.handle('SetReasoningLanguage', async () => undefined)
+  ipcMain.handle('SaveProvider', async (_event, provider) => {
+    const saved = saveProviderToConfig(provider)
+    if (!String(readJsonFile(desktopAgentSettingsPath()).defaultModel || '').trim()) saveDefaultModel(`${saved.name}/${saved.default || saved.models[0]}`)
+    resetAgentWorker()
+  })
+  ipcMain.handle('SaveProviderWithKey', async (_event, provider, key) => {
+    const view = providerView(provider)
+    if (key) saveStoredProviderKey(view.apiKeyEnv, key, view.name)
+    const saved = saveProviderToConfig({ ...provider, apiKeyEnv: view.apiKeyEnv, keySet: Boolean(key) || view.keySet })
+    if (!String(readJsonFile(desktopAgentSettingsPath()).defaultModel || '').trim()) saveDefaultModel(`${saved.name}/${saved.default || saved.models[0]}`)
+    resetAgentWorker()
+    return saved.name
+  })
+  ipcMain.handle('AddOfficialProviderAccess', async (_event, kind, key) => {
+    const template = officialProviderTemplates().find((provider) => provider.name === String(kind || '').trim()) || officialProviderTemplates()[0]
+    if (key) saveStoredProviderKey(template.apiKeyEnv, key, template.name)
+    const saved = saveProviderToConfig({ ...template, added: true, keySet: Boolean(key) || template.keySet })
+    if (!String(readJsonFile(desktopAgentSettingsPath()).defaultModel || '').trim()) saveDefaultModel(`${saved.name}/${saved.default || saved.models[0]}`)
+    resetAgentWorker()
+    return saved.name
+  })
+  ipcMain.handle('AddProviderPresetAccess', async () => {
+    throw new Error('Provider presets are not bundled in this desktop build. Use Custom provider.')
+  })
+  ipcMain.handle('ResetProviderPresetAccess', async () => undefined)
+  ipcMain.handle('FetchProviderModels', async (_event, provider) => fetchProviderModels(provider))
+  ipcMain.handle('DeleteProvider', async (_event, name) => {
+    const config = readJsonFile(modelsConfigPath())
+    const providers = { ...(config.providers || {}) }
+    delete providers[normalizeProviderName(name)]
+    writeJsonFileAtomic(modelsConfigPath(), { providers })
+    resetAgentWorker()
+  })
+  ipcMain.handle('RemoveProviderAccess', async (_event, name) => {
+    const config = readJsonFile(modelsConfigPath())
+    const providers = { ...(config.providers || {}) }
+    delete providers[normalizeProviderName(name)]
+    writeJsonFileAtomic(modelsConfigPath(), { providers })
+    resetAgentWorker()
+  })
+  ipcMain.handle('SaveProviderKey', async (_event, apiKeyEnv, value) => {
+    const provider = saveStoredProviderKey(apiKeyEnv, value)
+    resetAgentWorker()
+    return provider
+  })
+  ipcMain.handle('SetProviderKey', async (_event, apiKeyEnv, value) => {
+    const provider = saveStoredProviderKey(apiKeyEnv, value)
+    resetAgentWorker()
+    return provider
+  })
+  ipcMain.handle('ClearProviderKey', async (_event, apiKeyEnv) => {
+    clearStoredProviderKey(apiKeyEnv)
+    resetAgentWorker()
+  })
+  ipcMain.handle('ReloadSettings', async () => undefined)
   ipcMain.handle('ListTabs', async () => [])
   ipcMain.handle('Tabs', async () => [])
 
   let agentWorker = null
+  function resetAgentWorker() {
+    if (!agentWorker) return
+    try {
+      agentWorker.kill()
+    } catch {
+      // Worker may have exited between the setting mutation and reset.
+    }
+    agentWorker = null
+  }
+
   function getAgentWorker() {
     if (!agentWorker) {
       agentWorker = require('node:child_process').fork(path.join(__dirname, 'agent-worker.mjs'))

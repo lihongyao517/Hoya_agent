@@ -561,11 +561,53 @@ const WAILS_IPC_NULL_SEND_RE = /Cannot read properties of null \(reading 'send'\
 // dev mock's model list leaking into the real app was exactly this bug).
 function realApp(): AppBindings | undefined {
   if (typeof window !== "undefined" && window.hoya) {
-    const implementedMethods = new Set(["Submit", "Chat", "Capabilities", "Settings", "ListTabs", "Tabs", "ClearSession", "ClearSessionForTab", "Cancel", "CancelTab"]);
+    const implementedMethods: Record<string, true> = {
+      Platform: true,
+      MinimiseMainWindow: true,
+      ToggleMaximiseMainWindow: true,
+      IsMainWindowMaximised: true,
+      CloseMainWindow: true,
+      Version: true,
+      Submit: true,
+      Chat: true,
+      Capabilities: true,
+      Settings: true,
+      ListTabs: true,
+      Tabs: true,
+      ClearSession: true,
+      ClearSessionForTab: true,
+      Cancel: true,
+      CancelTab: true,
+      Models: true,
+      ModelsForTab: true,
+      SetModel: true,
+      SetModelForTab: true,
+      SetDefaultModel: true,
+      SetPlannerModel: true,
+      SetSubagentModel: true,
+      SetSubagentEffort: true,
+      SetMaxSubagentDepth: true,
+      SetMaxSubagentConcurrency: true,
+      SetMaxParallelWriters: true,
+      SetColdResumePrune: true,
+      SetReasoningLanguage: true,
+      SaveProvider: true,
+      SaveProviderWithKey: true,
+      AddOfficialProviderAccess: true,
+      AddProviderPresetAccess: true,
+      ResetProviderPresetAccess: true,
+      FetchProviderModels: true,
+      DeleteProvider: true,
+      RemoveProviderAccess: true,
+      SaveProviderKey: true,
+      SetProviderKey: true,
+      ClearProviderKey: true,
+      ReloadSettings: true,
+    };
     return new Proxy({} as AppBindings, {
       get(target, prop, receiver) {
         if (typeof prop === "string") {
-          if (implementedMethods.has(prop)) {
+          if (implementedMethods[prop]) {
             return (...args: any[]) => window.hoya!.invoke(prop, ...args);
           }
           // Fallback to mock for unimplemented methods
