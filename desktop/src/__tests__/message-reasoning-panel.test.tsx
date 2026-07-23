@@ -72,6 +72,31 @@ await act(async () => {
 ok(document.querySelector(".reasoning__body")?.textContent?.includes("line two") ?? false, "clicking the header expands the reasoning body");
 
 await act(async () => {
+  root.render(
+    <LocaleProvider>
+      <AssistantMessage
+        item={{
+          kind: "assistant",
+          id: "a2",
+          text: "",
+          reasoning: "pi line",
+          streaming: false,
+          reasoningComplete: true,
+          reasoningSource: "piagent",
+          reasoningEvent: "thinking_delta",
+          reasoningDurationMs: 1200,
+        }}
+      />
+    </LocaleProvider>,
+  );
+});
+
+const piHeader = document.querySelector<HTMLButtonElement>(".reasoning--piagent .reasoning__head");
+ok(piHeader?.textContent?.includes("PiAgent thinking") ?? false, "PiAgent reasoning uses PiAgent-specific label");
+ok(piHeader?.textContent?.includes("pi-coding-agent · thinking_delta") ?? false, "PiAgent reasoning exposes source event metadata");
+ok(document.querySelector(".reasoning__badge")?.textContent === "PiAgent", "PiAgent reasoning renders a runtime badge");
+
+await act(async () => {
   root.unmount();
 });
 dom.window.close();

@@ -2494,6 +2494,9 @@ export const en = {
   // assistant message
   "msg.thinking": "thinking",
   "msg.thinkingRunning": "thinking…",
+  "msg.piAgentThinking": "PiAgent thinking stream",
+  "msg.piAgentThinkingRunning": "PiAgent thinking…",
+  "msg.piAgentThinkingMeta": "pi-coding-agent · {event}",
   "msg.thinkingDone": "done",
   "msg.thinkingDuration": "lasted {s}s",
   "msg.memoryCitationsCount": "{n} memory references",
@@ -2681,10 +2684,10 @@ export const en = {
 
   // onboarding — first-run model provider guide
   "onboarding.title": "Get started with Hoya Agent",
-  "onboarding.tagline": "Connect a model provider to start chatting. DeepSeek is recommended.",
-  "onboarding.inputLabel": "DeepSeek API key",
+  "onboarding.tagline": "Connect a model provider to start chatting.",
+  "onboarding.inputLabel": "API key",
   "onboarding.inputPlaceholder": "sk-…",
-  "onboarding.submit": "Connect DeepSeek",
+  "onboarding.submit": "Connect",
   "onboarding.chooseProvider": "Connect another model provider",
   "onboarding.validating": "Validating…",
   "onboarding.getKey": "How do I get a key?",

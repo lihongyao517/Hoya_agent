@@ -1707,6 +1707,9 @@ export const zhTW: Record<DictKey, string> = {
   // 助手訊息
   "msg.thinking": "思考過程",
   "msg.thinkingRunning": "思考中…",
+  "msg.piAgentThinking": "PiAgent 思考流",
+  "msg.piAgentThinkingRunning": "PiAgent 思考中…",
+  "msg.piAgentThinkingMeta": "pi-coding-agent · {event}",
   "msg.thinkingDone": "已完成",
   "msg.thinkingDuration": "持續了 {s} 秒",
   "msg.memoryCitationsCount": "{n} 條記憶引用",
@@ -1882,10 +1885,10 @@ export const zhTW: Record<DictKey, string> = {
 
   // onboarding — 首次使用模型服務引導
   "onboarding.title": "開始使用 Hoya Agent",
-  "onboarding.tagline": "連線模型服務後即可開始對話。推薦使用 DeepSeek。",
-  "onboarding.inputLabel": "DeepSeek API 金鑰",
+  "onboarding.tagline": "連線模型服務後即可開始對話。",
+  "onboarding.inputLabel": "API 金鑰",
   "onboarding.inputPlaceholder": "sk-…",
-  "onboarding.submit": "連線 DeepSeek",
+  "onboarding.submit": "連線",
   "onboarding.chooseProvider": "接入其他模型服務",
   "onboarding.validating": "驗證中…",
   "onboarding.getKey": "如何取得 API key？",

@@ -288,18 +288,56 @@ function clearStoredProviderKey(apiKeyEnv) {
   writeJsonFileAtomic(authConfigPath(), auth)
 }
 
+function splitModelRef(ref) {
+  const value = String(ref || '').trim()
+  const providers = loadProviderViews()
+  const exactProvider = providers.find((provider) => value.startsWith(`${provider.name}/`) && value.length > provider.name.length + 1)
+  if (exactProvider) {
+    const model = value.slice(exactProvider.name.length + 1)
+    return { provider: exactProvider.name, model, ref: modelRef(exactProvider.name, model) }
+  }
+  const ownerModelProvider = providers.find((provider) => provider.models.includes(value))
+  if (ownerModelProvider) return { provider: ownerModelProvider.name, model: value, ref: modelRef(ownerModelProvider.name, value) }
+  const slash = value.indexOf('/')
+  if (slash > 0 && slash < value.length - 1) {
+    return { provider: value.slice(0, slash), model: value.slice(slash + 1), ref: value }
+  }
+  return { provider: '', model: value, ref: value }
+}
+
+function modelRef(provider, model) {
+  const providerName = String(provider || '').trim()
+  const modelId = String(model || '').trim()
+  return providerName && modelId ? `${providerName}/${modelId}` : modelId
+}
+
 function saveDefaultModel(ref) {
   const settings = readJsonFile(desktopAgentSettingsPath())
-  settings.defaultModel = String(ref || '').trim()
+  const parsed = splitModelRef(ref)
+  settings.defaultProvider = parsed.provider
+  settings.defaultModel = parsed.model
+  settings.defaultModelRef = modelRef(parsed.provider, parsed.model)
   writeJsonFileAtomic(desktopAgentSettingsPath(), settings)
+}
+
+function hasSavedDefaultModel() {
+  const settings = readJsonFile(desktopAgentSettingsPath())
+  return Boolean(String(settings.defaultModel || settings.defaultModelRef || '').trim())
 }
 
 function loadDefaultModel(providers) {
   const settings = readJsonFile(desktopAgentSettingsPath())
-  const configured = String(settings.defaultModel || '').trim()
-  if (configured) return configured
+  if (settings.defaultProvider && settings.defaultModel) return modelRef(settings.defaultProvider, settings.defaultModel)
+  const configured = String(settings.defaultModelRef || settings.defaultModel || '').trim()
+  if (configured) {
+    const parsed = splitModelRef(configured)
+    if (parsed.provider) return parsed.ref
+    const provider = providers.find((item) => item.models.includes(parsed.model))
+    if (provider) return modelRef(provider.name, parsed.model)
+    return configured
+  }
   const firstProvider = providers.find((provider) => provider.configured && provider.models.length > 0) || providers.find((provider) => provider.models.length > 0)
-  return firstProvider ? `${firstProvider.name}/${firstProvider.default || firstProvider.models[0]}` : ''
+  return firstProvider ? modelRef(firstProvider.name, firstProvider.default || firstProvider.models[0]) : ''
 }
 
 function settingsView() {
@@ -327,7 +365,7 @@ function settingsView() {
     desktopTheme: 'auto',
     desktopThemeStyle: 'graphite',
     conversationWidth: 'standard',
-    closeBehavior: 'background',
+    statusBarItems: ['context', 'turn_tokens', 'git', 'model', 'mode', 'workspace'],
     displayMode: 'compact',
     statusBarStyle: 'text',
     statusBarItems: ['context', 'cost', 'git', 'model', 'mode', 'workspace'],
@@ -1150,6 +1188,74 @@ app.whenReady().then(() => {
     rememberWorkspace(result.filePaths[0])
     return result.filePaths[0]
   })
+
+  function getCurrentContextWindow() {
+    const defaultRef = loadDefaultModel(loadProviderViews())
+    const models = modelInfos()
+    const current = models.find(m => m.ref === defaultRef)
+    return current?.contextWindow || 128000
+  }
+
+  ipcMain.handle('ContextUsage', async () => ({ used: 0, window: getCurrentContextWindow(), sessionTokens: 0, compactRatio: 0.8 }))
+  ipcMain.handle('ContextUsageForTab', async () => ({ used: 0, window: getCurrentContextWindow(), sessionTokens: 0, compactRatio: 0.8 }))
+  ipcMain.handle('Balance', async () => ({ available: true, display: "¥0.00" }))
+  ipcMain.handle('BalanceForTab', async () => ({ available: true, display: "¥0.00" }))
+  ipcMain.handle('Jobs', async () => [])
+  ipcMain.handle('JobsForTab', async () => [])
+  ipcMain.handle('Effort', async () => ({ supported: true, current: 'auto', default: 'auto', levels: ['auto', 'low', 'medium', 'high', 'max'] }))
+  ipcMain.handle('EffortForTab', async () => ({ supported: true, current: 'auto', default: 'auto', levels: ['auto', 'low', 'medium', 'high', 'max'] }))
+  ipcMain.handle('ReplayPendingPrompts', async () => undefined)
+  ipcMain.handle('HistoryPageForTab', async () => ({ messages: [], startTurn: 0, endTurn: 0, totalTurns: 0, hasOlder: false }))
+  ipcMain.handle('HistoryCheckpointTurnsForTab', async () => [])
+  ipcMain.handle('CheckpointsForTab', async () => [])
+  ipcMain.handle('WorkbenchActiveTarget', async () => ({ kind: 'local', identityGen: 1, requestSeq: 1 }))
+  
+  function localTab() {
+    return {
+      id: 'local-1',
+      scope: 'project',
+      workspaceRoot: projectRoot(),
+      workspaceName: 'Local Workspace',
+      topicId: 't-1',
+      topicTitle: 'Current Session',
+      label: loadDefaultModel(loadProviderViews()) || 'Reasonix',
+      ready: true,
+      running: false,
+      mode: 'normal',
+      active: true,
+      cwd: projectRoot()
+    }
+  }
+  ipcMain.handle('Meta', async () => ({
+    label: loadDefaultModel(loadProviderViews()),
+    ready: true,
+    eventChannel: 'agent:event',
+    cwd: projectRoot(),
+    workspaceRoot: projectRoot(),
+    workspacePath: projectRoot(),
+    autoApproveTools: false,
+    bypass: false,
+    collaborationMode: 'normal',
+    toolApprovalMode: 'ask',
+    tokenMode: 'full'
+  }))
+  ipcMain.handle('MetaForTab', async () => ({
+    label: loadDefaultModel(loadProviderViews()),
+    ready: true,
+    eventChannel: 'agent:event',
+    cwd: projectRoot(),
+    workspaceRoot: projectRoot(),
+    workspacePath: projectRoot(),
+    autoApproveTools: false,
+    bypass: false,
+    collaborationMode: 'normal',
+    toolApprovalMode: 'ask',
+    tokenMode: 'full'
+  }))
+  ipcMain.handle('DesktopStartupSettings', async () => {
+    const { bot, desktopLanguage, desktopLayoutStyle, desktopTheme, desktopThemeStyle, displayMode, statusBarStyle, statusBarItems, checkUpdates, conversationWidth } = settingsView()
+    return { bot, desktopLanguage, desktopLayoutStyle, desktopTheme, desktopThemeStyle, displayMode, statusBarStyle, statusBarItems, checkUpdates, conversationWidth }
+  })
   ipcMain.handle('hoya:select-file', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openFile'] })
     if (result.canceled || result.filePaths.length === 0) return null
@@ -1173,8 +1279,16 @@ app.whenReady().then(() => {
   ipcMain.handle('Settings', async () => settingsView())
   ipcMain.handle('Models', async () => modelInfos())
   ipcMain.handle('ModelsForTab', async () => modelInfos())
-  ipcMain.handle('SetModel', async (_event, name) => saveDefaultModel(name))
-  ipcMain.handle('SetModelForTab', async (_event, _tabID, name) => saveDefaultModel(name))
+  ipcMain.handle('SetModel', async (_event, name) => {
+    saveDefaultModel(name)
+    resetAgentWorker()
+    mainWindow?.webContents.send('runtime:rebuilt')
+  })
+  ipcMain.handle('SetModelForTab', async (_event, tabID, name) => {
+    saveDefaultModel(name)
+    resetAgentWorker()
+    mainWindow?.webContents.send('runtime:rebuilt', String(tabID || 'local-1'))
+  })
   ipcMain.handle('SetDefaultModel', async (_event, ref) => {
     saveDefaultModel(ref)
     resetAgentWorker()
@@ -1241,9 +1355,8 @@ app.whenReady().then(() => {
     clearStoredProviderKey(apiKeyEnv)
     resetAgentWorker()
   })
-  ipcMain.handle('ReloadSettings', async () => undefined)
-  ipcMain.handle('ListTabs', async () => [])
-  ipcMain.handle('Tabs', async () => [])
+  ipcMain.handle('ListTabs', async () => [localTab()])
+  ipcMain.handle('Tabs', async () => [localTab()])
 
   let agentWorker = null
   function resetAgentWorker() {
@@ -1271,12 +1384,32 @@ app.whenReady().then(() => {
     return agentWorker
   }
 
-  ipcMain.handle('Submit', async (event, input) => {
-    try {
-      getAgentWorker().send({ type: 'Submit', input, cwd: projectRoot() })
-    } catch (e) {
-      console.error(e)
-    }
+  function sendAgentMessage(message) {
+    const worker = getAgentWorker()
+    if (!worker.connected) throw new Error('Agent worker IPC channel is not connected.')
+    worker.send(message)
+  }
+
+  ipcMain.handle('Submit', async (_event, input) => {
+    sendAgentMessage({ type: 'Submit', input, cwd: projectRoot() })
+  })
+  ipcMain.handle('SubmitToTab', async (_event, _tabID, input) => {
+    sendAgentMessage({ type: 'Submit', input, cwd: projectRoot() })
+  })
+  ipcMain.handle('SubmitDisplay', async (_event, _display, input) => {
+    sendAgentMessage({ type: 'Submit', input, cwd: projectRoot() })
+  })
+  ipcMain.handle('SubmitDisplayToTab', async (_event, _tabID, _display, input) => {
+    sendAgentMessage({ type: 'Submit', input, cwd: projectRoot() })
+  })
+  ipcMain.handle('SubmitDeliveryRecoveryToTab', async (_event, _tabID, _display, input) => {
+    sendAgentMessage({ type: 'Submit', input, cwd: projectRoot() })
+  })
+  ipcMain.handle('SubmitInvocationsToTab', async (_event, _tabID, _display, input) => {
+    sendAgentMessage({ type: 'Submit', input, cwd: projectRoot() })
+  })
+  ipcMain.handle('SubmitEditedDisplayToTab', async (_event, _tabID, _display, input) => {
+    sendAgentMessage({ type: 'Submit', input, cwd: projectRoot() })
   })
 
   ipcMain.handle('Cancel', async (event) => {

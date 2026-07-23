@@ -56,6 +56,8 @@ const LiveAssistantMessage = memo(function LiveAssistantMessage({
               reasoning: live.reasoning,
               streaming: true,
               reasoningComplete: live.reasoningComplete,
+              reasoningSource: live.reasoningSource ?? item.reasoningSource,
+              reasoningEvent: live.reasoningEvent ?? item.reasoningEvent,
               reasoningDurationMs:
                 live.reasoningStartedAt && live.reasoningCompletedAt && live.reasoningCompletedAt >= live.reasoningStartedAt
                   ? live.reasoningCompletedAt - live.reasoningStartedAt
@@ -91,6 +93,8 @@ function InlineAssistantReasoning({ item }: { item: AssistantItem }) {
         reasoning: live.reasoning,
         streaming: true,
         reasoningComplete: live.reasoningComplete,
+        reasoningSource: live.reasoningSource ?? item.reasoningSource,
+        reasoningEvent: live.reasoningEvent ?? item.reasoningEvent,
       }
     : item;
   const reasoning = shown.reasoning.trim();
@@ -110,7 +114,7 @@ function InlineAssistantReasoning({ item }: { item: AssistantItem }) {
         aria-expanded={open}
       >
         <ProcessBrainIcon size={12} />
-        <span>{running ? t("msg.thinkingRunning") : t("msg.thinking")}</span>
+        <span>{shown.reasoningSource === "piagent" ? t(running ? "msg.piAgentThinkingRunning" : "msg.piAgentThinking") : running ? t("msg.thinkingRunning") : t("msg.thinking")}</span>
         <ChevronRight className={`reasoning__chevron${open ? " reasoning__chevron--open" : ""}`} size={12} />
       </button>
       <div ref={bodyRef} className="turn-collapse__inline-reasoning">{visibleReasoning}</div>

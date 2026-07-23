@@ -4,23 +4,23 @@ import { getAgentDir } from '@earendil-works/pi-coding-agent';
 // Map pi-coding-agent events to the UI's WireEvent format
 function mapEventToWireEvent(e) {
   switch (e.type) {
-    case 'message_start':
-      if (e.message.role === 'assistant') {
-        return { kind: 'status', detail: 'Thinking...' };
+    case 'turn_start':
+      return { kind: 'turn_started' };
+    case 'message_update': {
+      const ae = e.assistantMessageEvent;
+      if (!ae) break;
+      if (ae.type === 'text_delta') {
+        return { kind: 'text', text: ae.delta };
+      }
+      if (ae.type === 'thinking_delta') {
+        return { kind: 'reasoning', reasoning: ae.delta, reasoningSource: 'piagent', reasoningEvent: ae.type };
       }
       break;
-    case 'message_update':
-      if (e.content) {
-        return { kind: 'text', text: e.content };
-      }
-      if (e.reasoning) {
-        return { kind: 'reasoning', reasoning: e.reasoning };
-      }
-      break;
+    }
     case 'tool_execution_start':
-      return { kind: 'tool_dispatch', tool: { id: e.toolName, name: e.toolName, input: JSON.stringify(e.input) } };
-    case 'tool_result':
-      return { kind: 'tool_result', tool: { id: e.toolName, name: e.toolName, result: e.result?.text || 'Done' } };
+      return { kind: 'tool_dispatch', tool: { id: e.toolCallId, name: e.toolName, args: JSON.stringify(e.args) } };
+    case 'tool_execution_end':
+      return { kind: 'tool_result', tool: { id: e.toolCallId, name: e.toolName, output: JSON.stringify(e.result), err: e.isError ? String(e.result) : undefined } };
     case 'session_shutdown':
     case 'agent_settled':
     case 'agent_end':
@@ -58,7 +58,6 @@ async function initRuntime(cwd) {
   }
 
   const sessionManager = SessionManager.inMemory(cwd);
-  const settingsManager = SettingsManager.create(cwd, agentDir);
 
   runtime = await createAgentSessionRuntime(async (options) => {
     const { createAgentSession } = await import('@earendil-works/pi-coding-agent');
@@ -66,11 +65,13 @@ async function initRuntime(cwd) {
       cwd: options.cwd,
       agentDir: options.agentDir,
       sessionManager: options.sessionManager,
+      sessionStartEvent: options.sessionStartEvent,
+      projectTrustContext: options.projectTrustContext,
     });
   }, { cwd, agentDir, sessionManager });
 
   // Hook up event translation
-  runtime.session.extensionRunner.on('*', (e) => {
+  runtime.session.subscribe((e) => {
     const wireEvent = mapEventToWireEvent(e);
     if (wireEvent) {
       process.send({ type: 'agent:event', payload: wireEvent });
@@ -84,13 +85,16 @@ let currentAbortController = null;
 
 process.on('message', async (msg) => {
   try {
+    console.log("Worker received message:", msg.type);
     if (msg.type === 'Submit' || msg.type === 'Chat') {
       if (currentAbortController) {
         currentAbortController.abort();
       }
       currentAbortController = new AbortController();
 
+      console.log("Initializing runtime...");
       const r = await initRuntime(msg.cwd || process.cwd());
+      console.log("Runtime initialized.");
       
       // Load user memory / global constraints from agent.md
       let promptInput = msg.input;
@@ -101,14 +105,16 @@ process.on('message', async (msg) => {
       }
 
       // Inform UI we're starting
-      process.send({ type: 'agent:event', payload: { kind: 'status', detail: 'Starting...' } });
+      process.send({ type: 'agent:event', payload: { kind: 'notice', level: 'info', text: 'PiAgent runtime started. Streaming pi-coding-agent events...' } });
       
       // Execute prompt
       try {
+        console.log("Prompting session with:", promptInput);
         await r.session.prompt(promptInput, { streamingBehavior: 'steer', signal: currentAbortController.signal });
+        console.log("Prompt finished.");
       } catch (err) {
         if (err.name === 'AbortError' || err.message?.includes('aborted')) {
-          process.send({ type: 'agent:event', payload: { kind: 'status', detail: 'Cancelled' } });
+          process.send({ type: 'agent:event', payload: { kind: 'notice', level: 'info', text: 'Cancelled' } });
         } else {
           throw err;
         }
@@ -126,6 +132,6 @@ process.on('message', async (msg) => {
       }
     }
   } catch (err) {
-    process.send({ type: 'agent:event', payload: { kind: 'error', err: String(err) } });
+    process.send({ type: 'agent:event', payload: { kind: 'turn_done', err: String(err?.message || err) } });
   }
 });

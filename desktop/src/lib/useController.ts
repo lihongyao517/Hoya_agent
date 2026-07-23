@@ -48,6 +48,8 @@ export type LiveStream = {
   reasoningComplete: boolean;
   reasoningStartedAt?: number;
   reasoningCompletedAt?: number;
+  reasoningSource?: string;
+  reasoningEvent?: string;
 };
 export type MessageActionScope = "fork" | "summ-from" | "summ-upto" | "conversation" | "code" | "both";
 export type MessageActionState = { turn: number; scope: MessageActionScope };
@@ -60,7 +62,7 @@ const HISTORY_PAGE_TURNS = 60;
 
 export type Item =
   | { kind: "user"; id: string; text: string; submitText?: string; failed?: boolean; createdAt?: number; checkpointTurn?: number }
-  | { kind: "assistant"; id: string; text: string; reasoning: string; streaming: boolean; reasoningComplete?: boolean; reasoningDurationMs?: number; workDurationMs?: number; memoryCitations?: MemoryCitation[] }
+  | { kind: "assistant"; id: string; text: string; reasoning: string; streaming: boolean; reasoningComplete?: boolean; reasoningDurationMs?: number; workDurationMs?: number; reasoningSource?: string; reasoningEvent?: string; memoryCitations?: MemoryCitation[] }
   | { kind: "phase"; id: string; text: string }
   | { kind: "notice"; id: string; level: "info" | "warn"; text: string; detail?: string; title?: string; variant?: "delivery"; action?: "continue_delivery" }
   | {
@@ -801,6 +803,8 @@ function applyEvent(s: State, e: WireEvent): State {
               reasoningComplete: false,
               reasoningStartedAt: base.reasoningStartedAt ?? (delta ? now : undefined),
               reasoningCompletedAt: undefined,
+              reasoningSource: e.reasoningSource ?? base.reasoningSource,
+              reasoningEvent: e.reasoningEvent ?? base.reasoningEvent,
             };
       return { ...s, items, live, currentAssistant: id, seq };
     }
@@ -1035,6 +1039,8 @@ function applyEvent(s: State, e: WireEvent): State {
             streaming: false,
             reasoningComplete: completedLive.reasoning !== "" || completedLive.reasoningComplete,
             reasoningDurationMs: liveReasoningDurationMs(completedLive) ?? it.reasoningDurationMs,
+            reasoningSource: completedLive.reasoningSource ?? it.reasoningSource,
+            reasoningEvent: completedLive.reasoningEvent ?? it.reasoningEvent,
             workDurationMs: index === lastAssistantIndex
               ? Math.max(it.workDurationMs ?? 0, workDurationMs ?? 0) || undefined
               : it.workDurationMs,
@@ -1191,7 +1197,7 @@ export function reducer(s: State, a: Action): State {
         };
       }
       const finalized = s.items.map((it) => {
-        if (it.kind === "assistant" && s.live && it.id === s.live.id) return { ...it, text: s.live.text, reasoning: s.live.reasoning, streaming: false };
+        if (it.kind === "assistant" && s.live && it.id === s.live.id) return { ...it, text: s.live.text, reasoning: s.live.reasoning, streaming: false, reasoningSource: s.live.reasoningSource ?? it.reasoningSource, reasoningEvent: s.live.reasoningEvent ?? it.reasoningEvent };
         if (it.kind === "assistant" && it.streaming) return { ...it, streaming: false };
         if (it.kind === "tool" && it.status === "running") return { ...it, status: "stopped" as const };
         return it;

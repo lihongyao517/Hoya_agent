@@ -918,11 +918,14 @@ function ReasoningPanel({
         truncateStreaming: truncateStreamingReasoning,
       })
     : "";
-  const label = isReasoningRunning ? t("msg.thinkingRunning") : t("msg.thinking");
-  const meta = isReasoningRunning ? "" : reasoningDurationLabel(item.reasoningDurationMs, t);
+  const isPiAgentReasoning = item.reasoningSource === "piagent";
+  const label = isPiAgentReasoning ? t(isReasoningRunning ? "msg.piAgentThinkingRunning" : "msg.piAgentThinking") : isReasoningRunning ? t("msg.thinkingRunning") : t("msg.thinking");
+  const durationMeta = isReasoningRunning ? "" : reasoningDurationLabel(item.reasoningDurationMs, t);
+  const sourceMeta = isPiAgentReasoning ? t("msg.piAgentThinkingMeta", { event: item.reasoningEvent ?? "thinking_delta" }) : "";
+  const meta = [durationMeta, sourceMeta].filter(Boolean).join(" · ");
 
   return (
-    <div className="reasoning">
+    <div className={`reasoning${isPiAgentReasoning ? " reasoning--piagent" : ""}`} data-runtime={isPiAgentReasoning ? "piagent" : undefined}>
       <button
         type="button"
         className="reasoning__head"
@@ -932,6 +935,7 @@ function ReasoningPanel({
       >
         <ProcessBrainIcon size={12} />
         <span data-creation-label={t("creation.reasoningLabel")}>{label}</span>
+        {isPiAgentReasoning && <span className="reasoning__badge">PiAgent</span>}
         {meta && <span className="reasoning__meta">{meta}</span>}
         <ChevronRight className={`reasoning__chevron${reasoningOpen ? " reasoning__chevron--open" : ""}`} size={12} />
       </button>

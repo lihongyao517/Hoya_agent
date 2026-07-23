@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, Check, ChevronsUpDown, CircleDollarSign, CircleGauge, Database, Folder, GitBranch, Laptop, Layers, Percent, RefreshCw, Server, Settings, Unplug, Wallet, Zap } from "lucide-react";
+import { Folder, GitBranch, Percent, Activity, Database, Zap, Server, ChevronsUpDown, Laptop, Check, Unplug, Settings } from "lucide-react";
 import { AnchoredPopover } from "./AnchoredPopover";
 import { RemoteConnectionErrorDialog } from "./RemoteConnectionErrorDialog";
 import { Tooltip } from "./Tooltip";
 import { useI18n, type Translator } from "../lib/i18n";
-import { formatMoneyLocalized } from "../lib/money";
 import { normalizeStatusBarItems, type StatusBarItemId } from "../lib/statusBarItems";
 import { isRemoteDegradedWarning, isRemoteHostKeyMismatch, isRemoteTerminalFailure, remoteConnectionErrorSummaryKey } from "../lib/remoteErrors";
 import { type BalanceInfo, type ContextInfo, type RemoteConnectionStatus, type RemoteHostView, type UsageSourceStats, type WireUsage } from "../lib/types";
@@ -18,19 +17,6 @@ function formatRate(hit: number, denom: number): string | null {
   return ((hit / denom) * 100).toFixed(2);
 }
 
-// nowRate is the SINGLE-TURN prompt cache-hit % (latest turn) — the higher,
-// steeper number on a non-compacting DeepSeek session. null when nothing yet.
-function nowRate(u?: WireUsage): string | null {
-  if (!u) return null;
-  const denom = u.cacheHitTokens + u.cacheMissTokens;
-  return formatRate(u.cacheHitTokens, denom);
-}
-
-// avgRate is the SESSION-AGGREGATE cache-hit % — Σhit/Σ(hit+miss) across every
-// turn — but scoped to the EXECUTOR agent only: the wire session counters come
-// from the main agent and exclude subagent/planner/auxiliary requests. It is
-// only the pre-first-refresh fallback; the authoritative all-sources number is
-// contextAvgRate below, so the "session average" label reports one scope.
 function avgRate(u?: WireUsage): string | null {
   if (!u) return null;
   const denom = u.sessionCacheHitTokens + u.sessionCacheMissTokens;
@@ -62,10 +48,6 @@ function formatTokenCount(tokens?: number): string {
   return tokens.toLocaleString();
 }
 
-function formatTurnCount(turns: number | undefined, t: Translator): string {
-  if (typeof turns !== "number" || turns < 0) return "-";
-  return t(turns === 1 ? "history.turnOne" : "history.turnOther", { n: turns });
-}
 
 const STATUS_SOURCE_ORDER = ["executor", "planner", "subagent", "compaction", "classifier", "title"];
 
@@ -156,14 +138,9 @@ function workspaceTooltip(t: Translator, displayPath: string, workspacePath?: st
 export function StatusBar({
   context,
   usage,
-  balance,
   running,
-  sessionTurns,
   sessionTokens,
   turnTokens,
-  turnCost,
-  cost,
-  currency,
   modelLabel,
   labelStyle = "text",
   items,
@@ -187,9 +164,6 @@ export function StatusBar({
   sessionTurns?: number;
   sessionTokens?: number;
   turnTokens?: number;
-  turnCost?: number;
-  cost?: number;
-  currency?: string;
   modelLabel?: string;
   labelStyle?: StatusBarLabelStyle;
   items?: readonly string[];
@@ -206,32 +180,26 @@ export function StatusBar({
   workbenchTarget?: WorkbenchActiveTarget;
   onSwitchLocal?: () => void;
 }) {
-  const { locale, t } = useI18n();
-  const pct = context.window ? Math.min(100, Math.round((context.used / context.window) * 100)) : null;
-  const compactPct = context.compactRatio ? Math.round(context.compactRatio * 100) : null;
-  const compactNear = pct !== null && compactPct !== null && pct >= Math.max(0, compactPct - 10);
-  const compactReached = pct !== null && compactPct !== null && pct >= compactPct;
-  const nowPct = nowRate(usage);
+  const { t } = useI18n();
   // All-sources telemetry first; the executor-only live counters only bridge
   // the gap before the first ContextInfo refresh of a fresh session.
   const avgPct = contextAvgRate(context) ?? avgRate(usage);
-  const turnCostLabel = formatMoneyLocalized(turnCost, currency, { locale });
-  const costLabel = formatMoneyLocalized(cost, currency, { locale });
   const displayWorkspacePath = (workspacePath || workspaceName || "").trim();
   const workspaceLabel = compactPath(displayWorkspacePath, workspaceName);
   const branchLabel = (gitBranch || "").trim();
   const workspaceTitle = displayWorkspacePath ? workspaceTooltip(t, displayWorkspacePath, workspacePath, branchLabel) : "";
-  const turnLabel = formatTurnCount(sessionTurns, t);
   const tokenLabel = formatTokenCount(sessionTokens);
   const turnTokenLabel = formatTokenCount(turnTokens);
-  const balanceLabel = balance?.available && balance.display ? balance.display : "-";
   const metricLabelStyle = labelStyle === "text" ? "text" : "icon";
   const visibleItems = normalizeStatusBarItems(items);
   const cacheTooltip = sourceCacheTooltip(t, t("status.cacheTitle"), context);
-  const avgCacheTooltip = sourceCacheTooltip(t, t("status.cacheAvgTitle"), context);
-  const itemRenderers: Record<StatusBarItemId, ReactNode> = {
+  const avgCacheTooltip = t("status.cacheAvgTitle");
+  const hit = context?.cacheHitTokens ?? 0;
+  const miss = context?.cacheMissTokens ?? 0;
+  const nowPct = context && (hit + miss) > 0 ? formatRate(hit, hit + miss) : null;
+  const itemRenderers: Partial<Record<StatusBarItemId, ReactNode>> = {
     model: (
-      <Tooltip label={t("status.modelTitle")}>
+      <Tooltip label={t("status.modelTitle")} className="statusbar__metric statusbar__metric--model">
         <span className="stat stat--model">
           <span className={`statusbar__dot ${running ? "statusbar__dot--busy" : ""}`} />
           {modelLabel && <span className="statusbar__model">{modelLabel}</span>}
@@ -283,61 +251,6 @@ export function StatusBar({
         <span className="stat statusbar__turn-tokens">
           <MetricLabel style={metricLabelStyle} icon={<Zap size={12} />} label={t("status.turnTokensLabel")} />
           <b className={turnTokenLabel === "-" ? "stat__value--empty" : undefined}>{turnTokenLabel}</b>
-        </span>
-      </Tooltip>
-    ),
-    turn_cost: (
-      <Tooltip label={t("status.turnCostTitle")} className="statusbar__metric statusbar__metric--turn-cost">
-        <span className="stat statusbar__turn-cost">
-          <MetricLabel style={metricLabelStyle} icon={<CircleDollarSign size={12} />} label={t("status.turnCostLabel")} />
-          <b>{turnCostLabel}</b>
-        </span>
-      </Tooltip>
-    ),
-    session_turns: (
-      <Tooltip label={t("status.sessionTurnsTitle")} className="statusbar__metric statusbar__metric--turns">
-        <span className="stat statusbar__turns">
-          <MetricLabel style={metricLabelStyle} icon={<RefreshCw size={12} />} label={t("status.sessionTurnsLabel")} />
-          <b className={turnLabel === "-" ? "stat__value--empty" : undefined}>{turnLabel}</b>
-        </span>
-      </Tooltip>
-    ),
-    context: (
-      <Tooltip label={t("status.ctxTitle")} className="statusbar__metric statusbar__metric--ctx">
-        <span className="stat statusbar__ctx">
-          <MetricLabel style={metricLabelStyle} icon={<CircleGauge size={12} />} label={t("status.ctxLabel")} />
-          <b className={pct === null ? "stat__value--empty" : undefined}>{pct !== null ? `${pct}%` : "-"}</b>
-        </span>
-      </Tooltip>
-    ),
-    compact: (
-      <Tooltip label={t("status.compactTitle")} className="statusbar__metric statusbar__metric--compact">
-        <span className="stat statusbar__compact">
-          <MetricLabel style={metricLabelStyle} icon={<Layers size={12} />} label={t("status.compactLabel")} />
-          <b
-            className={[
-              compactPct === null ? "stat__value--empty" : undefined,
-              compactReached ? "statusbar__compact-value--critical" : compactNear ? "statusbar__compact-value--warn" : undefined,
-            ].filter(Boolean).join(" ") || undefined}
-          >
-            {compactPct !== null ? `${compactPct}%` : "-"}
-          </b>
-        </span>
-      </Tooltip>
-    ),
-    cost: (
-      <Tooltip label={t("status.spendTitle")} className="statusbar__metric statusbar__metric--cost">
-        <span className="stat statusbar__cost">
-          <MetricLabel style={metricLabelStyle} icon={<CircleDollarSign size={12} />} label={t("status.costLabel")} />
-          <b>{costLabel}</b>
-        </span>
-      </Tooltip>
-    ),
-    balance: (
-      <Tooltip label={t("status.balanceTitle")} className="statusbar__metric statusbar__metric--balance">
-        <span className="stat stat--balance statusbar__balance">
-          <MetricLabel style={metricLabelStyle} icon={<Wallet size={12} />} label={t("status.balanceLabel")} />
-          <b className={balanceLabel === "-" ? "stat__value--empty" : undefined}>{balanceLabel}</b>
         </span>
       </Tooltip>
     ),

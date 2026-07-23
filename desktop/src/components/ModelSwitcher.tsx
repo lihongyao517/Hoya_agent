@@ -67,19 +67,19 @@ export function ModelSwitcher({ label, tabId, onPick }: { label: string; tabId?:
       .sort(([a], [b]) => {
         if (a === currentProvider) return -1;
         if (b === currentProvider) return 1;
-        return providerLabel(a, t).localeCompare(providerLabel(b, t));
+        return a.localeCompare(b);
       })
       .map(([provider, items]) => ({
         provider,
-        label: providerLabel(provider, t),
+        label: provider,
         items,
       }));
   }, [filtered, t]);
 
   const currentProvider = useMemo(() => {
     const cur = models.find((m) => m.current) ?? models.find((m) => m.model === label || m.ref === label);
-    return cur ? providerLabel(cur.provider, t) : null;
-  }, [label, models, t]);
+    return cur ? cur.provider : null;
+  }, [label, models]);
   const triggerLabel = currentProvider ? `${label} · ${currentProvider}` : label;
 
   const pick = (name: string) => {
@@ -155,13 +155,3 @@ export function ModelSwitcher({ label, tabId, onPick }: { label: string; tabId?:
   );
 }
 
-function providerLabel(provider: string, t: ReturnType<typeof useT>): string {
-  switch (provider) {
-    case "deepseek":
-    case "deepseek-flash":
-    case "deepseek-pro":
-      return t("settings.providerLabel.deepseek");
-    default:
-      return provider;
-  }
-}

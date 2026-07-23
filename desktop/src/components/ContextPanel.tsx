@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { asArray } from "../lib/array";
 import { app } from "../lib/bridge";
 import { useI18n, type Locale, type Translator } from "../lib/i18n";
-import { formatMoneyLocalized } from "../lib/money";
 import type { DictKey } from "../locales/en";
 import type { BalanceInfo, ContextInfo, ContextPanelInfo, UsageSourceStats, WireUsage } from "../lib/types";
 
@@ -13,10 +12,10 @@ interface ContextPanelProps {
   context?: ContextInfo;
   usage?: WireUsage;
   sessionTokens?: number;
+  turnTokens?: number;
   sessionCost?: number;
   sessionCurrency?: string;
   sessionTurns?: number;
-  turnTokens?: number;
   turnCost?: number;
   balance?: BalanceInfo;
   sessionGen?: number;
@@ -312,12 +311,8 @@ export function ContextPanel({
   tabId,
   context,
   usage,
-  sessionTokens,
-  sessionCost,
-  sessionCurrency,
   turnTokens,
-  turnCost,
-  balance,
+  sessionTokens,
   sessionGen,
   refreshKey,
   usageSeq,
@@ -386,8 +381,7 @@ export function ContextPanel({
   // miss come as a pair from one source so the rate cannot mix scopes.
   const { hit: sessionCacheHit, miss: sessionCacheMiss } = contextSessionCache(info, context, usage);
   const totalTokensMetric = formatMetricTokens(totalTokens, locale);
-  const cost = contextCostDisplay({ info, sessionCost, sessionCurrency, usage });
-  const sourceUsageRows = contextSourceRows(info, sessionCurrency);
+  const sourceUsageRows = contextSourceRows(info, undefined);
   const showSourceUsageRows = sourceUsageRows.length > 0;
   const sourceTotalTokens = sourceUsageRows.reduce((sum, row) => sum + sourceTokenTotal(row), 0);
   const visibleSourceRows = sourceUsageRows.slice(0, 3);
@@ -410,9 +404,6 @@ export function ContextPanel({
   const derivedRequestCount = Math.max(readFiles.length + changedFiles.length, 0);
   const requestCount = info?.requestCount && info.requestCount > 0 ? info.requestCount : derivedRequestCount;
   const windowStatus = contextWindowStatus(usagePct, compactPct);
-  const balanceLabel = balance?.available && balance.display ? balance.display : "-";
-  const turnCostLabel = formatMoneyLocalized(turnCost, sessionCurrency, { locale, empty: "dash" });
-  const sessionCostLabel = formatMoneyLocalized(cost.amount, cost.currency, { locale, empty: "dash" });
   const totalTokensTitle = totalTokensMetric.exact === "-" ? "-" : t("context.tokensValue", { value: totalTokensMetric.exact });
   const usedLabel = fmtFullTokens(usedTokens);
   const windowLabel = fmtFullTokens(windowTokens);
@@ -438,7 +429,6 @@ export function ContextPanel({
     const totalMetric = formatMetricTokens(sourceTokenTotal(row), locale);
     const cacheReported = row.cacheHitTokens + row.cacheMissTokens > 0;
     const cacheRate = cacheReported ? formatCacheHitRate(row.cacheHitTokens, row.cacheMissTokens) : t("context.cacheNotReported");
-    const costLabel = formatMoneyLocalized(row.cost, row.currency, { locale, empty: "dash" });
     return (
       <div className="context-panel__source-row" key={row.source}>
         <div className="context-panel__source-head">
@@ -451,7 +441,6 @@ export function ContextPanel({
         <div className="context-panel__source-summary">
           <SourceMetric label={t("context.total")} value={totalMetric.display} title={totalMetric.exact} />
           <SourceMetric label={t("context.sourceCacheRate")} value={cacheRate} />
-          <SourceMetric label={t("context.sourceCost")} value={costLabel} />
         </div>
         <details className="context-panel__source-details">
           <summary>{t("context.sourceDetails")}</summary>
@@ -525,7 +514,6 @@ export function ContextPanel({
             <div className="context-panel__session-metrics">
               <div className="context-panel__summary-rows">
                 <MiniStat label={t("status.cacheAvgLabel")} value={formatCacheHitRate(sessionCacheHit, sessionCacheMiss)} tone={cacheHitTone(sessionCacheHit, sessionCacheMiss)} />
-                <MiniStat label={t("context.sessionCost")} value={sessionCostLabel} />
                 <MiniStat label={t("context.time")} value={fmtDuration(elapsed, t)} />
                 <MiniStat label={t("context.requests")} value={requestCount > 0 ? String(requestCount) : "-"} />
                 <MiniStat label={t("context.sessionTokensShort")} value={totalTokensMetric.display} title={totalTokensTitle} wide />
@@ -535,8 +523,6 @@ export function ContextPanel({
           <section className="context-panel__creation-grid" aria-label={t("context.overview")}>
             <MetricCard label={t("status.cacheLabel")} value={fmtUsageCacheRate(usage)} tone="accent" />
             <MetricCard label={t("status.turnTokensLabel")} value={fmtOptionalTokens(turnTokens)} />
-            <MetricCard label={t("status.turnCostLabel")} value={turnCostLabel} />
-            <MetricCard label={t("status.balanceLabel")} value={balanceLabel} tone="accent" />
           </section>
           <section className="context-panel__section context-panel__analysis">
             <SectionHeading title={t("context.usageAnalysis")}>

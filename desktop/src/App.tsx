@@ -939,7 +939,7 @@ function materializeLiveItems(items: Item[], live?: LiveStream): Item[] {
   if (!live) return items;
   return items.map((item) => {
     if (item.kind !== "assistant" || item.id !== live.id) return item;
-    return { ...item, text: live.text, reasoning: live.reasoning, streaming: true };
+    return { ...item, text: live.text, reasoning: live.reasoning, streaming: true, reasoningSource: live.reasoningSource ?? item.reasoningSource, reasoningEvent: live.reasoningEvent ?? item.reasoningEvent };
   });
 }
 
@@ -4309,23 +4309,17 @@ export default function App() {
               guidanceQueuePreviewItems={guidanceQueueMockItems}
               showContextWindowRing={sidebarCreation}
               context={state.context}
-              turnCost={state.turnCost}
               cacheHitTokens={state.usage?.cacheHitTokens}
               cacheMissTokens={state.usage?.cacheMissTokens}
-              balance={state.balance}
             />
             </div>
             <StatusBar
               context={state.context}
               usage={state.usage}
-              balance={state.balance}
               running={state.running || rewindCommitting}
               sessionTurns={sessionTurns}
               sessionTokens={state.sessionTokens}
               turnTokens={state.turnTotalTokens}
-              turnCost={state.turnCost}
-              cost={state.sessionCost}
-              currency={state.sessionCurrency}
               modelLabel={state.meta?.label}
               labelStyle={statusBarStyle}
               items={statusBarItems}
@@ -4434,12 +4428,8 @@ export default function App() {
                   context={state.context}
                   usage={state.usage}
                   sessionTokens={state.sessionTokens}
-                  sessionCost={state.sessionCost}
-                  sessionCurrency={state.sessionCurrency}
                   sessionTurns={sessionTurns}
                   turnTokens={state.turnTotalTokens}
-                  turnCost={state.turnCost}
-                  balance={state.balance}
                   sessionGen={state.sessionGen}
                   refreshKey={dockRefreshKey}
                   usageSeq={state.usageSeq}

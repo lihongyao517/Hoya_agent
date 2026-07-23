@@ -162,6 +162,8 @@ export interface WireEvent {
   // Stable notice id for localization; empty/absent = localize by text match.
   code?: string;
   reasoning?: string;
+  reasoningSource?: string;
+  reasoningEvent?: string;
   memoryCitations?: MemoryCitation[];
   level?: "info" | "warn";
   tool?: WireTool;

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { app } from "../lib/bridge";
 import { useI18n } from "../lib/i18n";
-import { formatMoneyLocalized } from "../lib/money";
 import type { BalanceInfo, ContextInfo, ContextPanelInfo } from "../lib/types";
 import { AnchoredPopover } from "./AnchoredPopover";
 import {
@@ -40,8 +39,8 @@ function fmtDuration(ms: number, t: ReturnType<typeof useI18n>['t']): string {
   return t("context.durationMinutesSeconds", { minutes, seconds });
 }
 
-export function ContextWindowRing({ enabled = true, context, tabId, turnCost, cacheHitTokens, cacheMissTokens, balance }: ContextWindowRingProps) {
-  const { locale, t } = useI18n();
+export function ContextWindowRing({ enabled = true, context, tabId, cacheHitTokens, cacheMissTokens }: ContextWindowRingProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [info, setInfo] = useState<ContextPanelInfo | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -117,9 +116,6 @@ export function ContextWindowRing({ enabled = true, context, tabId, turnCost, ca
   const tokensToCompact = compactTokens > used ? compactTokens - used : 0;
   const ringOffset = RING_C * (1 - usagePct / 100);
   const elapsed = info?.elapsedMs && info.elapsedMs > 0 ? fmtDuration(info.elapsedMs, t) : undefined;
-  const sessionCost = info?.sessionCost && info.sessionCost > 0
-    ? formatMoneyLocalized(info.sessionCost, info.sessionCurrency, { locale, empty: "dash" })
-    : undefined;
 
   return (
     <>
@@ -192,24 +188,6 @@ export function ContextWindowRing({ enabled = true, context, tabId, turnCost, ca
               <span className="context-ring-popover__label">{t("status.cacheLabel")}</span>
               <span className="context-ring-popover__value">{turnCacheRate}</span>
             </div>
-            {turnCost != null && turnCost > 0 && (
-              <div className="context-ring-popover__row">
-                <span className="context-ring-popover__label">{t("status.turnCostLabel")}</span>
-                <span className="context-ring-popover__value">{turnCost.toFixed(4)}</span>
-              </div>
-            )}
-            {sessionCost && (
-              <div className="context-ring-popover__row">
-                <span className="context-ring-popover__label">{t("context.sessionCost")}</span>
-                <span className="context-ring-popover__value">{sessionCost}</span>
-              </div>
-            )}
-            {balance?.available && balance.display && (
-              <div className="context-ring-popover__row">
-                <span className="context-ring-popover__label">{t("status.balanceLabel")}</span>
-                <span className="context-ring-popover__value context-ring-popover__value--accent">{balance.display}</span>
-              </div>
-            )}
           </div>
         </div>
       </AnchoredPopover>

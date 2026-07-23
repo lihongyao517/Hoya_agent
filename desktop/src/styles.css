@@ -4336,6 +4336,22 @@ a[href] {
 .reasoning__head > svg:first-child {
   color: color-mix(in srgb, var(--fg-faint) 88%, transparent);
 }
+.reasoning--piagent .reasoning__head {
+  color: color-mix(in srgb, var(--accent) 72%, var(--fg-faint));
+}
+.reasoning--piagent .reasoning__head:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.reasoning__badge {
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--accent) 78%, var(--fg));
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
 .reasoning__meta {
   color: color-mix(in srgb, var(--fg-faint) 88%, transparent);
   font-weight: 500;
@@ -4653,6 +4669,12 @@ a[href] {
   font-style: normal;
   line-height: 1.72;
   white-space: pre-wrap;
+}
+.reasoning--piagent .reasoning__body {
+  border-left-color: color-mix(in srgb, var(--accent) 46%, var(--border));
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 38%);
+  padding-top: 2px;
+  padding-bottom: 2px;
 }
 /* ── markdown prose ──────────────────────────────────────────────────────── */
 .md {
