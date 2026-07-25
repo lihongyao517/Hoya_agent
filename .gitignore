@@ -1,0 +1,46 @@
+.DS_Store
+node_modules
+.worktrees
+.sst
+.env
+.env.local
+.idea
+.vscode
+.codex
+*~
+playground
+tmp
+dist
+ts-dist
+.turbo
+**/.serena
+.serena/
+**/.omo
+.omo/
+/result
+refs
+Session.vim
+/opencode.json
+a.out
+target
+.scripts
+.direnv/
+
+# Local dev files
+opencode-dev
+UPCOMING_CHANGELOG.md
+logs/
+*.bun-build
+tsconfig.tsbuildinfo
+
+# HoyaAgent local/build
+.cache/
+packages/desktop/out/
+packages/desktop/dist/
+packages/**/out/
+*.exe
+*.blockmap
+
+# Skip workflows for limited PAT
+.github/workflows/
+

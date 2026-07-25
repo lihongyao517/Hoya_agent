@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Hoya Agent">
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="#15201d"/>
+  <rect x="139" y="126" width="66" height="260" rx="33" fill="#f4f8f6"/>
+  <rect x="307" y="126" width="66" height="260" rx="33" fill="#f4f8f6"/>
+  <rect x="172" y="223" width="168" height="66" rx="33" fill="#2dd4bf"/>
+  <circle cx="256" cy="256" r="18" fill="#15201d"/>
+</svg>

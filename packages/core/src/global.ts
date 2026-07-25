@@ -1,0 +1,94 @@
+import path from "path"
+import fs from "fs/promises"
+import os from "os"
+import { Context, Effect, Layer } from "effect"
+import { Flock } from "./util/flock"
+import { Flag } from "./flag/flag"
+import { makeGlobalNode } from "./effect/app-node"
+
+const app = "hoya"
+const root = path.resolve(process.env.HOYA_HOME ?? process.env.OPENCODE_TEST_HOME ?? path.join(os.homedir(), ".hoya"))
+const data = path.join(root, "data")
+const cache = path.join(root, "cache")
+const config = root
+const state = path.join(root, "state")
+const tmp = path.join(os.tmpdir(), app)
+
+const paths = {
+  get home() {
+    return process.env.OPENCODE_TEST_HOME ?? os.homedir()
+  },
+  root,
+  data,
+  bin: path.join(root, "bin"),
+  log: path.join(data, "log"),
+  repos: path.join(data, "repos"),
+  cache,
+  config,
+  state,
+  tmp,
+}
+
+export const Path = paths
+
+Flock.setGlobal({ state })
+
+await Promise.all([
+  fs.mkdir(Path.root, { recursive: true }),
+  fs.mkdir(Path.data, { recursive: true }),
+  fs.mkdir(Path.config, { recursive: true }),
+  fs.mkdir(Path.state, { recursive: true }),
+  fs.mkdir(Path.tmp, { recursive: true }),
+  fs.mkdir(Path.log, { recursive: true }),
+  fs.mkdir(Path.bin, { recursive: true }),
+  fs.mkdir(Path.repos, { recursive: true }),
+  fs.mkdir(path.join(Path.cache, "skills"), { recursive: true }),
+  fs.mkdir(path.join(Path.config, "skills"), { recursive: true }),
+  fs.mkdir(path.join(Path.config, "agents"), { recursive: true }),
+  fs.mkdir(path.join(Path.config, "commands"), { recursive: true }),
+  fs.mkdir(path.join(Path.config, "plugins"), { recursive: true }),
+])
+
+export class Service extends Context.Service<Service, Interface>()("@opencode/Global") {}
+
+export interface Interface {
+  readonly home: string
+  readonly data: string
+  readonly cache: string
+  readonly config: string
+  readonly state: string
+  readonly tmp: string
+  readonly bin: string
+  readonly log: string
+  readonly repos: string
+}
+
+export function make(input: Partial<Interface> = {}): Interface {
+  return {
+    home: Path.home,
+    data: Path.data,
+    cache: Path.cache,
+    config: Flag.OPENCODE_CONFIG_DIR ?? Path.config,
+    state: Path.state,
+    tmp: Path.tmp,
+    bin: Path.bin,
+    log: Path.log,
+    repos: Path.repos,
+    ...input,
+  }
+}
+
+const layer = Layer.effect(
+  Service,
+  Effect.sync(() => Service.of(make())),
+)
+
+export const node = makeGlobalNode({ service: Service, layer: layer, deps: [] })
+
+export const layerWith = (input: Partial<Interface>) =>
+  Layer.effect(
+    Service,
+    Effect.sync(() => Service.of(make(input))),
+  )
+
+export * as Global from "./global"
