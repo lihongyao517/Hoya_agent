@@ -1,0 +1,16 @@
+{
+  "name": "@hoyaagent/pi-bridge",
+  "version": "1.18.4",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "typecheck": "bun build src/index.ts --outdir=dist --target=node --outfile=dist/index.js"
+  },
+  "dependencies": {}
+}

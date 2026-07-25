@@ -32,8 +32,8 @@ import { handleDocumentSearchKeydown } from "@/utils/search-keydown"
 import { createEventListener } from "@solid-primitives/event-listener"
 import { matchesModelSearch } from "./dialog-select-model-search"
 
-const isFree = (provider: string, cost: { input: number } | undefined) =>
-  provider === "opencode" && (!cost || cost.input === 0)
+const isFree = (provider: string, cost: { input: number } | undefined, modelID = "") =>
+  provider === "opencode" || cost?.input === 0 || /:free$/i.test(modelID) || /\bfree\b/i.test(modelID)
 
 type ModelState = ReturnType<typeof useLocal>["model"]
 type ModelItem = ReturnType<ModelState["list"]>[number]
@@ -94,7 +94,7 @@ const ModelList: Component<{
           placement="right-start"
           gutter={12}
           openDelay={0}
-          value={<ModelTooltip model={item} latest={item.latest} free={isFree(item.provider.id, item.cost)} />}
+          value={<ModelTooltip model={item} latest={item.latest} free={isFree(item.provider.id, item.cost, item.id)} />}
         >
           {node}
         </Tooltip>
@@ -109,7 +109,7 @@ const ModelList: Component<{
       {(i) => (
         <div class="w-full flex items-center gap-x-2 text-13-regular">
           <span class="truncate">{i.name}</span>
-          <Show when={isFree(i.provider.id, i.cost)}>
+          <Show when={isFree(i.provider.id, i.cost, i.id)}>
             <Tag>{language.t("model.tag.free")}</Tag>
           </Show>
           <Show when={i.latest}>
@@ -457,7 +457,7 @@ export function ModelSelectorPopoverV2(props: {
                                 <ModelTooltip
                                   model={item}
                                   latest={item.latest}
-                                  free={isFree(item.provider.id, item.cost)}
+                                  free={isFree(item.provider.id, item.cost, item.id)}
                                   v2
                                 />
                               }
@@ -475,7 +475,7 @@ export function ModelSelectorPopoverV2(props: {
                                 onSelect={() => selectModel(item)}
                               >
                                 <span class="min-w-0 truncate leading-5">{item.name}</span>
-                                <Show when={isFree(item.provider.id, item.cost)}>
+                                <Show when={isFree(item.provider.id, item.cost, item.id)}>
                                   <TagV2 class="shrink-0">{language.t("model.tag.free")}</TagV2>
                                 </Show>
                                 <Show when={item.latest}>

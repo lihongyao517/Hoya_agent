@@ -3,6 +3,8 @@ import { defineConfig } from "electron-vite"
 import appPlugin from "@opencode-ai/app/vite"
 import * as fs from "node:fs/promises"
 
+// Prefer Pi bridge kernel. Fall back to OpenCode node dist only if bridge is missing.
+const PI_BRIDGE_ENTRY = "../pi-bridge/src/index.ts"
 const OPENCODE_SERVER_DIST = "../opencode/dist/node"
 
 const channel = (() => {
@@ -64,16 +66,25 @@ const require = __cjs_mod__.createRequire(import.meta.url);
       {
         name: "opencode:virtual-server-module",
         enforce: "pre",
-        resolveId(id) {
-          if (id === "virtual:opencode-server") return this.resolve(`${OPENCODE_SERVER_DIST}/node.js`)
+        async resolveId(id) {
+          if (id !== "virtual:opencode-server") return
+          // Pi bridge is the HoyaAgent kernel (OpenCode-compatible HTTP surface).
+          const bridge = await this.resolve(PI_BRIDGE_ENTRY, undefined, { skipSelf: true })
+          if (bridge) return typeof bridge === "string" ? bridge : bridge.id
+          const fallback = await this.resolve(`${OPENCODE_SERVER_DIST}/node.js`)
+          return typeof fallback === "string" ? fallback : fallback?.id
         },
       },
       {
         name: "opencode:copy-server-assets",
         async writeBundle() {
-          for (const l of await fs.readdir(OPENCODE_SERVER_DIST)) {
-            if (!l.endsWith(".wasm")) continue
-            await fs.writeFile(`./out/main/chunks/${l}`, await fs.readFile(`${OPENCODE_SERVER_DIST}/${l}`))
+          try {
+            for (const l of await fs.readdir(OPENCODE_SERVER_DIST)) {
+              if (!l.endsWith(".wasm")) continue
+              await fs.writeFile(`./out/main/chunks/${l}`, await fs.readFile(`${OPENCODE_SERVER_DIST}/${l}`))
+            }
+          } catch {
+            // Pi kernel does not ship wasm assets from opencode dist.
           }
         },
       },

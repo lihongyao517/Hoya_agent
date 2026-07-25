@@ -6,12 +6,13 @@ import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
 import { useMutation } from "@tanstack/solid-query"
 import { TextField } from "@opencode-ai/ui/text-field"
 import { showToast } from "@/utils/toast"
-import { batch, For } from "solid-js"
-import { createStore, produce } from "solid-js/store"
+import { batch, For, Show, createSignal } from "solid-js"
+import { createStore, produce, reconcile } from "solid-js/store"
 import { Link } from "@/components/link"
 import { useServerSDK } from "@/context/server-sdk"
 import { useServerSync } from "@/context/server-sync"
 import { useLanguage } from "@/context/language"
+import { usePlatform } from "@/context/platform"
 import { type FormState, headerRow, modelRow, validateCustomProvider } from "./dialog-custom-provider-form"
 
 type Props = {
@@ -45,6 +46,7 @@ export function CustomProviderForm(props: { autofocus?: boolean } = {}) {
   const serverSync = useServerSync()
   const serverSDK = useServerSDK()
   const language = useLanguage()
+  const platform = usePlatform()
 
   const [form, setForm] = createStore<FormState>({
     providerID: "",
@@ -55,6 +57,95 @@ export function CustomProviderForm(props: { autofocus?: boolean } = {}) {
     headers: [headerRow()],
     err: {},
   })
+  const [discovering, setDiscovering] = createSignal(false)
+  const [discovered, setDiscovered] = createSignal<Array<{ id: string; name: string }>>([])
+  const [selectedModels, setSelectedModels] = createStore<Record<string, boolean>>({})
+
+  const fetchModels = async () => {
+    const baseURL = form.baseURL.trim()
+    if (!baseURL || !/^https?:\/\//.test(baseURL)) {
+      setForm("err", "baseURL", language.t("provider.custom.error.baseURL.format"))
+      return
+    }
+    setDiscovering(true)
+    try {
+      const headers = Object.fromEntries(
+        form.headers
+          .map((h) => [h.key.trim(), h.value.trim()] as const)
+          .filter(([k, v]) => k && v),
+      )
+      const sdk = serverSDK()
+      const http = sdk.server.http
+      const auth =
+        http?.password
+          ? {
+              Authorization: `Basic ${btoa(`${http.username ?? "opencode"}:${http.password}`)}`,
+            }
+          : {}
+            const response = await (platform.fetch ?? fetch)(`${(http?.url ?? sdk.url).replace(/\/$/, "")}/provider/discover`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...auth },
+        body: JSON.stringify({
+          baseURL,
+          apiKey: form.apiKey.trim() || undefined,
+          headers: Object.keys(headers).length ? headers : undefined,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data?.error || `HTTP ${response.status}`)
+      const models = Array.isArray(data?.models) ? data.models : []
+      if (models.length === 0) throw new Error(language.t("provider.custom.discover.empty"))
+      setDiscovered(models)
+      const next: Record<string, boolean> = {}
+      for (const model of models) next[model.id] = true
+      setSelectedModels(reconcile(next))
+      // Prefill form models with all discovered entries so submit works immediately.
+      setForm(
+        "models",
+        models.map((model: { id: string; name: string }) => ({
+          row: `row-${model.id}`,
+          id: model.id,
+          name: model.name || model.id,
+          err: {},
+        })),
+      )
+      showToast({
+        variant: "success",
+        title: language.t("provider.custom.discover.success.title"),
+        description: language.t("provider.custom.discover.success.description", { count: models.length }),
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      showToast({
+        variant: "error",
+        title: language.t("provider.custom.discover.failed.title"),
+        description: message,
+      })
+    } finally {
+      setDiscovering(false)
+    }
+  }
+
+  const applySelectedModels = () => {
+    const models = discovered().filter((model) => selectedModels[model.id])
+    if (models.length === 0) {
+      showToast({
+        variant: "error",
+        title: language.t("provider.custom.discover.noneSelected.title"),
+        description: language.t("provider.custom.discover.noneSelected.description"),
+      })
+      return
+    }
+    setForm(
+      "models",
+      models.map((model) => ({
+        row: `row-${model.id}`,
+        id: model.id,
+        name: model.name || model.id,
+        err: {},
+      })),
+    )
+  }
 
   const addModel = () => {
     setForm(
@@ -142,6 +233,22 @@ export function CustomProviderForm(props: { autofocus?: boolean } = {}) {
             key: result.key,
           },
         })
+
+        // Verify connectivity before saving config.
+        const sdk = serverSDK()
+        const http = sdk.server.http
+        const authHdr = http?.password
+          ? { Authorization: `Basic ${btoa(`${http.username ?? "opencode"}:${http.password}`)}` }
+          : {}
+        const resp = await (platform.fetch ?? fetch)(`${(http?.url ?? sdk.url).replace(/\/$/, "")}/provider/verify`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...authHdr },
+          body: JSON.stringify({ providerID: result.providerID, key: result.key }),
+        })
+        const data = await resp.json().catch(() => ({}))
+        if (!resp.ok) {
+          throw new Error(data?.error || `Verification failed (HTTP ${resp.status})`)
+        }
       }
 
       await serverSync().updateConfig({
@@ -150,7 +257,12 @@ export function CustomProviderForm(props: { autofocus?: boolean } = {}) {
       })
       return result
     },
-    onSuccess: (result) => {
+    onSuccess: async (result) => {
+      try {
+        await serverSDK().client.global.dispose()
+      } catch {
+        // ignore dispose failures; config already saved
+      }
       dialog.close()
       showToast({
         variant: "success",
@@ -224,6 +336,49 @@ export function CustomProviderForm(props: { autofocus?: boolean } = {}) {
             value={form.apiKey}
             onChange={(v) => setField("apiKey", v)}
           />
+          <Button
+            type="button"
+            size="large"
+            variant="secondary"
+            disabled={discovering()}
+            onClick={() => void fetchModels()}
+            class="self-start"
+          >
+            {discovering()
+              ? language.t("provider.custom.discover.loading")
+              : language.t("provider.custom.discover.action")}
+          </Button>
+          <Show when={discovered().length > 0}>
+            <div class="flex flex-col gap-2 rounded-md border border-border-weak-base p-3">
+              <div class="flex items-center justify-between gap-2">
+                <div class="text-12-medium text-text-weak">
+                  {language.t("provider.custom.discover.result", { count: discovered().length })}
+                </div>
+                <div class="flex gap-2">
+                  <Button type="button" size="small" variant="ghost" onClick={applySelectedModels}>
+                    {language.t("provider.custom.discover.apply")}
+                  </Button>
+                </div>
+              </div>
+              <div class="max-h-40 overflow-y-auto flex flex-col gap-1">
+                <For each={discovered()}>
+                  {(model) => (
+                    <label class="flex items-center gap-2 text-13-regular text-text-base px-1 py-1 rounded hover:bg-surface-raised-base-hover">
+                      <input
+                        type="checkbox"
+                        checked={!!selectedModels[model.id]}
+                        onChange={(e) => setSelectedModels(model.id, e.currentTarget.checked)}
+                      />
+                      <span class="truncate font-medium">{model.id}</span>
+                      <Show when={model.name && model.name !== model.id}>
+                        <span class="truncate text-text-weak">{model.name}</span>
+                      </Show>
+                    </label>
+                  )}
+                </For>
+              </div>
+            </div>
+          </Show>
         </div>
 
         <div class="flex flex-col gap-3">

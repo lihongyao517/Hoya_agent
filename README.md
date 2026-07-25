@@ -1,67 +1,92 @@
 # HoyaAgent
 
-HoyaAgent 是面向本地开发的 AI 编程助手桌面端，基于 Electron + SolidJS 构建，支持多模型提供商、会话工作区与桌面原生体验。
+HoyaAgent 是面向本地开发的 AI 编程助手桌面端。
+
+- **前端**：Electron + SolidJS（OpenCode Desktop 风格 UI）
+- **内核**：Pi（`D:\程序\hoyaagent\pi` / `@earendil-works/pi-coding-agent`）
+- **桥接**：`packages/pi-bridge` 提供 OpenCode 兼容的 HTTP/SSE，让现有前端正常显示
 
 仓库：https://github.com/lihongyao517/Hoya_agent
 
+## 架构
+
+```text
+桌面 UI (packages/app)
+    │  HTTP + SSE（/session /provider /global/event …）
+    ▼
+pi-bridge (packages/pi-bridge)   ← OpenCode 合同适配层
+    │  进程内 SDK
+    ▼
+Pi coding-agent / agent-core / pi-ai
+```
+
 ## 功能概览
 
-- 桌面应用（Windows / macOS / Linux）
-- 多 AI 提供商接入（Anthropic、OpenAI、Google、OpenRouter、GitHub Copilot 等）
-- 会话式编码协作、文件与终端联动
-- 经典布局为默认，可在设置中切换新布局
-- 本地配置与数据隔离（`~/.hoya`）
+- 桌面应用（Windows 优先）
+- Pi 多提供商模型（Anthropic / OpenAI / Google / OpenRouter 等）
+- 会话、流式回复、工具调用（read / bash / edit / write）
+- 经典布局默认
+- 本地数据：`~/.hoya`（Pi agent 配置在 `~/.hoya/pi-agent`）
 
 ## 环境要求
 
-- [Bun](https://bun.sh) `1.3+`（推荐与根目录 `package.json` 的 `packageManager` 一致）
-- Windows 打包需要足够磁盘空间（建议 C 盘预留 **8GB+**）
-- 不依赖 git 分支即可构建（脚本会自动回退 channel/version）
+- [Bun](https://bun.sh) `1.3+`
+- [Node.js](https://nodejs.org) `>= 22.19`（构建 Pi 需要）
+- 本地 Pi 源码：`D:\程序\hoyaagent\pi`（或设置 `HOYA_PI_ROOT`）
 
-## 从源码运行（开发）
+## 准备 Pi 内核
 
 ```powershell
-git clone https://github.com/lihongyao517/Hoya_agent.git
-cd Hoya_agent
+cd D:\程序\hoyaagent\pi
+npm install --ignore-scripts
+npm run hydrate:model-data
+npm run build:offline
+```
 
-# 安装依赖（必须在仓库根目录）
+确认存在：
+
+```text
+D:\程序\hoyaagent\pi\packages\coding-agent\dist\index.js
+```
+
+## 从源码运行
+
+```powershell
+cd D:\程序\hoyaagent\Hoya_agent
 bun install
 
-# 启动桌面端（开发模式）
+# 指向 Pi monorepo
+$env:HOYA_PI_ROOT = "D:\程序\hoyaagent\pi"
+$env:HOYA_KERNEL = "pi"
+
+# 开发模式
 bun --cwd packages/desktop dev
-# 或
-bun run dev:desktop
 ```
 
-其他常用命令：
+## 单独调试 pi-bridge
 
 ```powershell
-# 仅启动 Web UI（需后端）
-bun run dev:web
+$env:HOYA_PI_ROOT = "D:\程序\hoyaagent\pi"
+$env:HOYA_HOME = "$env:USERPROFILE\.hoya"
+$env:OPENCODE_SERVER_PASSWORD = "dev"
+$env:PORT = "4096"
+bun packages/pi-bridge/src/cli.ts
 
-# 启动核心 CLI / 服务
-bun run dev
+# 另开终端探测
+curl http://127.0.0.1:4096/global/health
 ```
 
-## 打包 Windows 安装包
-
-在仓库根目录执行：
+## 打包 Windows
 
 ```powershell
-# 可选：指定 channel / version（不设也会用默认 prod + package.json version）
+$env:HOYA_PI_ROOT = "D:\程序\hoyaagent\pi"
+$env:HOYA_KERNEL = "pi"
 $env:OPENCODE_CHANNEL = "prod"
 $env:OPENCODE_VERSION = "1.18.4"
-
-# 国内网络建议设置 Electron 镜像，并把缓存放到空间更大的盘
 $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
-$env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/"
 $env:ELECTRON_BUILDER_CACHE = "D:\cache\electron-builder"
-$env:ELECTRON_CACHE = "D:\cache\electron"
 
-# 构建前端 + 后端 node sidecar
 bun --cwd packages/desktop build
-
-# 打 Windows 安装包
 bun --cwd packages/desktop package:win
 ```
 
@@ -69,70 +94,54 @@ bun --cwd packages/desktop package:win
 
 ```text
 packages/desktop/dist/HoyaAgent-win-x64.exe
-packages/desktop/dist/win-unpacked/
 ```
 
-macOS / Linux：
+## 使用说明
 
-```powershell
-bun --cwd packages/desktop package:mac
-bun --cwd packages/desktop package:linux
-```
+1. 启动应用
+2. 设置 → 提供商 → 连接 API Key（写入 `~/.hoya/pi-agent/auth.json`）
+3. 选择模型，新建会话，开始对话
+4. 工具调用会以卡片形式出现在时间线
 
-### 打包失败常见原因
+## 当前限制（Pi MVP）
 
-| 现象 | 原因 | 处理 |
-| --- | --- | --- |
-| `Cannot find module .../build-node.ts` | 旧克隆缺少该文件 | `git pull` 更新到最新 main |
-| `fatal: not a git repository` / channel 解析失败 | 旧脚本依赖 git branch | 已修复；或手动设 `OPENCODE_CHANNEL` / `OPENCODE_VERSION` |
-| `connect ETIMEDOUT` 下载 Electron | 网络访问 GitHub releases 失败 | 设置上面的 `ELECTRON_MIRROR` |
-| `磁盘空间不足` / 7z / nsis 失败 | C 盘空间不够 | 清理 C 盘，并把 `ELECTRON_BUILDER_CACHE` 指到 D 盘 |
-| `bun install` 很慢或失败 | 依赖未装全 | 必须在**仓库根目录**执行 `bun install` |
+| 能力 | 状态 |
+|------|------|
+| 会话 / 流式回复 | 已实现 |
+| 工具卡片（bash/read/edit/write） | 已实现（基础映射） |
+| 提供商 API Key | 已实现 |
+| MCP | 未实现（UI 可忽略） |
+| 内置终端 PTY | 未接 Pi |
+| OpenCode 会话迁移 | 不兼容，使用 Pi JSONL |
+| WSL sidecar | 未适配 Pi |
 
 ## 项目结构
 
 ```text
 Hoya_agent/
 ├── packages/
-│   ├── desktop/     # Electron 桌面壳
-│   ├── app/         # 桌面 / Web 前端 UI
-│   ├── opencode/    # 核心服务与 CLI（含 script/build-node.ts）
-│   ├── ui/          # 共享 UI 组件
+│   ├── desktop/      # Electron 壳（sidecar 加载 pi-bridge）
+│   ├── app/          # Solid 前端
+│   ├── pi-bridge/    # ★ Pi 内核适配层（OpenCode HTTP 合同）
+│   ├── opencode/     # 旧内核（仅 fallback，默认不用）
 │   └── ...
-├── script/          # 构建与发布脚本
 └── README.md
 ```
 
-## 配置与数据
+## 环境变量
 
-- 应用协议：`hoyaagent://`
-- 本地目录：`~/.hoya`
-- 配置文件：`hoya.json` / `hoya.jsonc`
-- 设置键前缀：`hoya.*`
-
-## 布局说明
-
-- **默认使用经典（旧）布局**
-- 设置 → 通用 →「新布局」可手动切换
-- 不会在升级时自动强制切到新布局
-
-## 开发提示
-
-```powershell
-# 类型检查（在对应 package 目录执行）
-bun --cwd packages/app typecheck
-bun --cwd packages/desktop typecheck
-```
-
-关键文件（桌面打包依赖）：
-
-- `packages/opencode/script/build-node.ts` — 构建内嵌 Node 服务
-- `packages/desktop/scripts/prebuild.ts` / `predev.ts` — 打包/开发前准备
-- `packages/desktop/icons/*` — 应用图标源（会复制到 `resources/icons`）
+| 变量 | 说明 |
+|------|------|
+| `HOYA_PI_ROOT` | Pi monorepo 路径 |
+| `HOYA_KERNEL` | `pi`（默认）或 `opencode` |
+| `HOYA_HOME` | 本地配置根目录 |
+| `PI_CODING_AGENT_DIR` | Pi agent 配置目录（默认 `HOYA_HOME/pi-agent`） |
+| `OPENCODE_SERVER_PASSWORD` | sidecar Basic 密码 |
 
 ## 版本
 
-当前桌面端版本：`1.18.4`（见 `packages/desktop/package.json`）
+桌面端：`1.18.4`  
+内核：Pi coding-agent（本地 monorepo）
 
 ## 许可证
 

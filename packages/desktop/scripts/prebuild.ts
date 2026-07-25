@@ -16,11 +16,27 @@ const channel = resolveChannel()
 await $`bun ./scripts/copy-icons.ts ${channel}`
 await $`bun ./scripts/copy-metainfo.ts ${channel}`
 
-const buildNode = path.resolve("../opencode/script/build-node.ts")
-if (!existsSync(buildNode)) {
-  throw new Error(
-    `Missing ${buildNode}. Desktop packaging requires packages/opencode/script/build-node.ts. Pull the latest main branch.`,
+// Ensure Pi kernel is built when HOYA_KERNEL=pi (default).
+const piRoot = process.env.HOYA_PI_ROOT || path.resolve("../../../pi")
+const piEntry = path.join(piRoot, "packages/coding-agent/dist/index.js")
+if (!existsSync(piEntry)) {
+  console.log(`[prebuild] Pi dist missing at ${piEntry}, attempting offline build...`)
+  if (existsSync(path.join(piRoot, "package.json"))) {
+    await $`npm --prefix ${piRoot} run build:offline`.nothrow()
+  }
+}
+if (!existsSync(piEntry)) {
+  console.warn(
+    `[prebuild] Pi kernel not found. Build it manually:\n` +
+      `  cd ${piRoot}\n` +
+      `  npm install --ignore-scripts\n` +
+      `  npm run hydrate:model-data\n` +
+      `  npm run build:offline`,
   )
 }
 
-await $`cd ../opencode && bun script/build-node.ts`
+// Keep OpenCode node build as optional fallback for non-pi kernels.
+const buildNode = path.resolve("../opencode/script/build-node.ts")
+if (process.env.HOYA_KERNEL === "opencode" && existsSync(buildNode)) {
+  await $`cd ../opencode && bun script/build-node.ts`
+}

@@ -81,10 +81,23 @@ async function stop() {
 }
 
 function prepareSidecarEnv(password: string, userDataPath: string) {
+  const piRoot =
+    process.env.HOYA_PI_ROOT ||
+    process.env.PI_ROOT ||
+    // Common local layout: .../hoyaagent/Hoya_agent + sibling pi/
+    "D:/程序/hoyaagent/pi"
+
   Object.assign(process.env, {
     OPENCODE_SERVER_USERNAME: "opencode",
     OPENCODE_SERVER_PASSWORD: password,
     XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
+    HOYA_HOME: process.env.HOYA_HOME ?? userDataPath,
+    OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR ?? userDataPath,
+    // Point Pi coding-agent config under Hoya home.
+    PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR ?? `${userDataPath.replace(/\\/g, "/")}/pi-agent`,
+    PI_CONFIG_DIR: process.env.PI_CONFIG_DIR ?? userDataPath,
+    HOYA_PI_ROOT: piRoot,
+    HOYA_KERNEL: process.env.HOYA_KERNEL ?? "pi",
   })
 }
 

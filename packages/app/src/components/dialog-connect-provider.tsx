@@ -33,6 +33,7 @@ import { useServerSDK } from "@/context/server-sdk"
 import { useServerSync } from "@/context/server-sync"
 import { useLanguage } from "@/context/language"
 import { useSettings } from "@/context/settings"
+import { usePlatform } from "@/context/platform"
 import { popularProviders, useProviders } from "@/hooks/use-providers"
 import { CustomProviderForm } from "./dialog-custom-provider"
 
@@ -307,7 +308,7 @@ function ProviderPickerV2(props: {
         />
       </div>
       <div class="relative min-h-0 flex-1">
-        <div class="flex size-full min-h-0 flex-col gap-4 overflow-y-auto pb-8 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div class="flex size-full min-h-0 flex-col gap-4 overflow-y-auto pb-10 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <For
             each={[
               { title: language.t("dialog.provider.group.popular"), items: popular },
@@ -316,8 +317,8 @@ function ProviderPickerV2(props: {
           >
             {(group) => (
               <Show when={group.items().length > 0}>
-                <section class="flex flex-col">
-                  <div class="px-3 pb-2 text-[13px] font-[440] leading-none tracking-[-0.04px] text-v2-text-text-muted">
+                <section class="flex flex-col gap-0.5">
+                  <div class="sticky top-0 z-[1] bg-v2-background-bg-layer-01 px-3 pb-2 pt-1 text-[13px] font-[440] leading-none tracking-[-0.04px] text-v2-text-text-muted">
                     {group.title}
                   </div>
                   <For each={group.items()}>
@@ -325,7 +326,7 @@ function ProviderPickerV2(props: {
                       <button
                         type="button"
                         data-provider-id={provider.id}
-                        class="flex min-h-9 w-full items-center gap-2 rounded-md px-3 py-2.5 text-left text-[13px] leading-none tracking-[-0.04px] hover:bg-v2-overlay-simple-overlay-hover focus:bg-v2-overlay-simple-overlay-hover focus:outline-none"
+                        class="relative z-0 flex min-h-9 w-full items-center gap-2 rounded-md px-3 py-2.5 text-left text-[13px] leading-none tracking-[-0.04px] hover:bg-v2-overlay-simple-overlay-hover focus:bg-v2-overlay-simple-overlay-hover focus:outline-none"
                         classList={{ "bg-v2-overlay-simple-overlay-hover": store.active === provider.id }}
                         onMouseEnter={() => setStore("active", provider.id)}
                         disabled={store.connecting !== undefined}
@@ -356,7 +357,7 @@ function ProviderPickerV2(props: {
           </Show>
         </div>
         <div
-          class="pointer-events-none absolute inset-x-0 bottom-0 h-10"
+          class="pointer-events-none absolute inset-x-0 bottom-0 z-[2] h-8"
           style={{ background: "linear-gradient(to bottom, transparent, var(--v2-background-bg-layer-01))" }}
         />
       </div>
@@ -375,6 +376,7 @@ function ProviderConnection(props: {
   const serverSDK = useServerSDK()
   const language = useLanguage()
   const settings = useSettings()
+  const platform = usePlatform()
   const newLayout = settings.general.newLayoutDesigns
   const providers = useProviders(props.directory)
 
@@ -837,6 +839,31 @@ function ProviderConnection(props: {
           ...(store.promptInputs ? { metadata: store.promptInputs } : {}),
         },
       })
+
+      // Verify connectivity before showing success.
+      try {
+        const sdk = serverSDK()
+        const http = sdk.server.http
+        const auth = http?.password
+          ? { Authorization: `Basic ${btoa(`${http.username ?? "opencode"}:${http.password}`)}` }
+          : {}
+        const resp = await (platform.fetch ?? fetch)(`${(http?.url ?? sdk.url).replace(/\/$/, "")}/provider/verify`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...auth },
+          body: JSON.stringify({ providerID: props.provider, key: apiKey }),
+        })
+        const data = await resp.json().catch(() => ({}))
+        if (!resp.ok) {
+          const message = data?.error || `Verification failed (HTTP ${resp.status})`
+          setFormStore("error", message)
+          return
+        }
+      } catch (verifyError) {
+        const message = verifyError instanceof Error ? verifyError.message : String(verifyError)
+        setFormStore("error", message)
+        return
+      }
+
       await complete()
     }
 
