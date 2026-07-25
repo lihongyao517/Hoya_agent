@@ -1,16 +1,11 @@
-# HoyaAgent
+# HoyaAgent 补充说明
 
-This project is a direct OpenCode desktop fork/rebrand. The desktop UI source is kept from packages/desktop and packages/app instead of replacing it with a custom React UI.
+主文档见 [README.md](./README.md)。
 
-Run:
+本仓库是 HoyaAgent 桌面端项目源码。UI 主要位于 `packages/desktop` 与 `packages/app`。
 
 ```powershell
 bun install
 bun --cwd packages/desktop dev
-```
-
-Build Windows package:
-
-```powershell
 bun --cwd packages/desktop package:win
 ```

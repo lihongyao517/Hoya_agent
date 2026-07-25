@@ -1,129 +1,119 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">The open source AI coding agent.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+# HoyaAgent
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
+HoyaAgent 是面向本地开发的 AI 编程助手桌面端，基于 Electron + SolidJS 构建，支持多模型提供商、会话工作区与桌面原生体验。
 
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+仓库：https://github.com/lihongyao517/Hoya_agent
 
----
+## 功能概览
 
-### Installation
+- 桌面应用（Windows / macOS / Linux）
+- 多 AI 提供商接入（Anthropic、OpenAI、Google、OpenRouter、GitHub Copilot 等）
+- 会话式编码协作、文件与终端联动
+- 经典布局为默认，可在设置中切换新布局
+- 本地配置与数据隔离（`~/.hoya`）
 
-```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
+## 环境要求
 
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
+- [Bun](https://bun.sh) `1.3+`
+- Node.js 兼容环境（Windows 开发建议使用较新版本）
+- 打包 Windows 安装包时需要可用的磁盘空间（建议 C 盘预留足够空间）
+
+## 快速开始
+
+```powershell
+# 安装依赖
+bun install
+
+# 启动桌面端（开发模式）
+bun --cwd packages/desktop dev
+# 或
+bun run dev:desktop
 ```
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+其他常用开发命令：
 
-### Desktop App (BETA)
+```powershell
+# 仅启动 Web UI（需后端）
+bun run dev:web
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
-
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
-
-```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
+# 启动核心 CLI / 服务
+bun run dev
 ```
 
-#### Installation Directory
+## 打包
 
-The install script respects the following priority order for the installation path:
-
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
-
-```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+```powershell
+# Windows 安装包
+$env:OPENCODE_CHANNEL = "prod"
+$env:OPENCODE_VERSION = "1.18.4"
+bun --cwd packages/desktop build
+bun --cwd packages/desktop package:win
 ```
 
-### Agents
+打包产物默认输出到：
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+```text
+packages/desktop/dist/HoyaAgent-win-x64.exe
+packages/desktop/dist/win-unpacked/
+```
 
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
+macOS / Linux：
 
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
+```powershell
+bun --cwd packages/desktop package:mac
+bun --cwd packages/desktop package:linux
+```
 
-Learn more about [agents](https://opencode.ai/docs/agents).
+## 项目结构
 
-### Documentation
+```text
+Hoya_agent/
+├── packages/
+│   ├── desktop/     # Electron 桌面壳
+│   ├── app/         # 桌面 / Web 前端 UI
+│   ├── opencode/    # 核心服务与 CLI
+│   ├── ui/          # 共享 UI 组件
+│   └── ...
+├── script/          # 构建与发布脚本
+└── README.md
+```
 
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
+## 配置与数据
 
-### Contributing
+- 应用协议：`hoyaagent://`
+- 本地目录：`~/.hoya`
+- 配置文件：`hoya.json` / `hoya.jsonc`
+- 设置键前缀：`hoya.*`
 
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
+## 布局说明
 
-### Building on OpenCode
+- **默认使用经典（旧）布局**
+- 设置 → 通用 →「新布局」可手动切换
+- 不会在升级时自动强制切到新布局
 
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+## 开发提示
 
----
+```powershell
+# 类型检查（在对应 package 目录执行）
+bun --cwd packages/app typecheck
+bun --cwd packages/desktop typecheck
 
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+# 安装依赖后若有原生模块问题，可按 package 文档处理
+bun install
+```
+
+若 Windows 打包下载 Electron 失败，可设置镜像：
+
+```powershell
+$env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+$env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/"
+$env:ELECTRON_BUILDER_CACHE = "D:\path\to\cache\electron-builder"
+```
+
+## 版本
+
+当前桌面端版本：`1.18.4`（见 `packages/desktop/package.json`）
+
+## 许可证
+
+MIT
