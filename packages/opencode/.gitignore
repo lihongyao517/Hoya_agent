@@ -3,6 +3,9 @@ dist
 dist-*
 gen
 app.log
+# Keep build-node.ts tracked — desktop prebuild depends on it.
+# Ignore other generated build-*.ts helpers if any.
 script/build-*.ts
+!script/build-node.ts
 temporary-*.md
 .artifacts
