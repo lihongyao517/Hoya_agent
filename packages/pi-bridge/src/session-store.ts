@@ -3,7 +3,7 @@ import os from "node:os"
 import { id, projectIdForDirectory } from "./ids"
 import { emit } from "./events"
 import { loadPiCodingAgent } from "./pi-loader"
-import { loadAuthFile, loadConfig, mergeConfig, saveAuthProvider } from "./config-store"
+import { enableProvider, loadAuthFile, loadConfig, mergeConfig, saveAuthProvider, syncPiModelsJson } from "./config-store"
 
 type AnySession = {
   subscribe: (listener: (event: any) => void) => () => void
@@ -44,6 +44,7 @@ export type BridgeSession = {
   model?: { providerID: string; modelID: string }
   time: { created: number; updated: number }
   status: "idle" | "busy" | "retry" | "compacting"
+  revert?: { messageID: string }
   messages: BridgeMessage[]
   pi?: AnySession
   unsub?: () => void
@@ -81,15 +82,51 @@ export async function initKernel() {
   await fs.mkdir(agentDir, { recursive: true })
   await fs.mkdir(path.join(agentDir, "sessions"), { recursive: true })
 
+  // Hoya stores custom providers in hoya.json; Pi only reads models.json.
+  await syncPiModelsJson()
+
   const loaded = await loadPiCodingAgent()
   piMod = loaded.mod
-  if (piMod.ModelRuntime?.create) {
-    modelRuntime = await piMod.ModelRuntime.create({
-      authPath: path.join(agentDir, "auth.json"),
-      modelsPath: path.join(agentDir, "models.json"),
-    })
-  }
+  modelRuntime = await createModelRuntime()
+  await injectAuthKeys()
   return { root: loaded.root, agentDir }
+}
+
+async function createModelRuntime() {
+  if (!piMod.ModelRuntime?.create) throw new Error("Pi ModelRuntime.create missing")
+  return piMod.ModelRuntime.create({
+    authPath: path.join(agentDir, "auth.json"),
+    modelsPath: path.join(agentDir, "models.json"),
+  })
+}
+
+async function injectAuthKeys() {
+  if (!modelRuntime) return
+  const auth = await loadAuthFile()
+  for (const [providerID, entry] of Object.entries(auth)) {
+    const key = typeof entry?.key === "string" ? entry.key.trim() : ""
+    if (!key || key.length > 512 || key.includes("\n")) continue
+    if (typeof modelRuntime.setRuntimeApiKey === "function") {
+      try {
+        await modelRuntime.setRuntimeApiKey(providerID, key)
+      } catch (error) {
+        console.warn("[pi-bridge] setRuntimeApiKey failed", providerID, error)
+      }
+    }
+  }
+}
+
+async function reloadModelRuntime() {
+  await syncPiModelsJson()
+  modelRuntime = await createModelRuntime()
+  await injectAuthKeys()
+  if (typeof modelRuntime.reloadConfig === "function") {
+    try {
+      await modelRuntime.reloadConfig()
+    } catch {
+      // ignore
+    }
+  }
 }
 
 function modelCost(model: any) {
@@ -219,6 +256,8 @@ export async function listProviders() {
         name: meta?.name || modelID,
         status: "active",
         tags: meta?.cost?.input === 0 ? ["free"] : [],
+        limit: { context: 128_000 },
+        capabilities: { reasoning: true, input: {} },
         ...(meta?.cost ? { cost: meta.cost } : {}),
       }
     }
@@ -251,27 +290,8 @@ export async function setProviderAuth(providerID: string, key: string) {
   if (!modelRuntime) await initKernel()
   // Persist first so dispose/reinit keeps the key.
   await saveAuthProvider(providerID, key)
-  if (typeof modelRuntime.setRuntimeApiKey === "function") {
-    try {
-      await modelRuntime.setRuntimeApiKey(providerID, key)
-    } catch (error) {
-      console.warn("[pi-bridge] setRuntimeApiKey failed", error)
-    }
-  }
-  // Reload runtime from disk so hasConfiguredAuth stays true after dispose.
-  if (piMod.ModelRuntime?.create) {
-    modelRuntime = await piMod.ModelRuntime.create({
-      authPath: path.join(agentDir, "auth.json"),
-      modelsPath: path.join(agentDir, "models.json"),
-    })
-  }
-  if (typeof modelRuntime.reloadConfig === "function") {
-    try {
-      await modelRuntime.reloadConfig()
-    } catch {
-      // ignore
-    }
-  }
+  await enableProvider(providerID)
+  await reloadModelRuntime()
 }
 
 export async function updateBridgeConfig(patch: Record<string, any>) {
@@ -280,9 +300,10 @@ export async function updateBridgeConfig(patch: Record<string, any>) {
   for (const [providerID, conf] of Object.entries(next.provider ?? {})) {
     const key = conf?.options?.apiKey
     if (typeof key === "string" && key.trim()) {
-      await setProviderAuth(providerID, key.trim())
+      await saveAuthProvider(providerID, key.trim())
     }
   }
+  await reloadModelRuntime()
   return next
 }
 
@@ -316,6 +337,10 @@ export async function createSession(input: {
   let model
   if (input.model && typeof modelRuntime?.getModel === "function") {
     model = modelRuntime.getModel(input.model.providerID, input.model.modelID)
+    if (!model) {
+      await reloadModelRuntime()
+      model = modelRuntime.getModel(input.model.providerID, input.model.modelID)
+    }
   }
 
   if (typeof piMod.createAgentSession !== "function") {
@@ -375,6 +400,7 @@ export function publicSession(session: BridgeSession) {
     agent: session.agent,
     model: session.model,
     time: session.time,
+    revert: session.revert,
   }
 }
 
@@ -403,15 +429,14 @@ export async function promptSession(
 
   if (!text) throw new Error("Empty prompt")
 
-  if (input.model && modelRuntime?.getModel && session.pi) {
-    const model = modelRuntime.getModel(input.model.providerID, input.model.modelID)
-    if (model && typeof (session.pi as any).setModel === "function") {
-      await (session.pi as any).setModel(model)
-      session.model = input.model
-    } else {
-      session.model = input.model
-    }
+  const desiredModel = input.model || session.model
+  if (desiredModel) {
+    await applySessionModel(session, desiredModel)
   }
+  if (!session.model?.providerID || !session.model?.modelID) {
+    throw new Error("No model selected. Choose a provider/model first.")
+  }
+  if (!session.pi) throw new Error("Pi session not ready")
 
   const userMessageID = input.messageID || id("msg")
   const userMessage: BridgeMessage = {
@@ -448,7 +473,7 @@ export async function promptSession(
   emit(session.directory, "message.updated", { info: assistant.info, parts: assistant.parts })
 
   // Run prompt without blocking HTTP (async style like prompt_async)
-  void session.pi!
+  void session.pi
     .prompt(text)
     .catch((error: unknown) => {
       assistant.info.error = error instanceof Error ? error.message : String(error)
@@ -461,6 +486,8 @@ export async function promptSession(
       })
     })
     .finally(() => {
+      // Pi may finish without emitting bridge-friendly deltas; harvest final text from agent state.
+      harvestAssistantText(session, assistant)
       session.status = "idle"
       session.time.updated = Date.now()
       assistant.info.time.completed = Date.now()
@@ -471,6 +498,74 @@ export async function promptSession(
     })
 
   return { messageID: userMessageID, assistantID }
+}
+
+export async function revertSession(sessionID: string, messageID: string, directory?: string) {
+  const session = await ensureSession(sessionID, directory)
+  const index = session.messages.findIndex((message) => message.info.id >= messageID)
+  if (index >= 0) session.messages.splice(index)
+  session.revert = { messageID }
+  session.status = "idle"
+  session.time.updated = Date.now()
+  emit(session.directory, "session.updated", { info: publicSession(session) })
+  emit(session.directory, "session.status", { sessionID, status: { type: "idle" } })
+  return publicSession(session)
+}
+
+export async function unrevertSession(sessionID: string, directory?: string) {
+  const session = await ensureSession(sessionID, directory)
+  delete session.revert
+  session.time.updated = Date.now()
+  emit(session.directory, "session.updated", { info: publicSession(session) })
+  return publicSession(session)
+}
+
+function harvestAssistantText(session: BridgeSession, assistant: BridgeMessage) {
+  try {
+    const msgs = session.pi?.agent?.state?.messages ?? []
+    const lastAssistant = [...msgs].reverse().find((m: any) => m.role === "assistant")
+    if (!lastAssistant) return
+    const text = extractText(lastAssistant)
+    if (text) {
+      let textPart = assistant.parts.find((p) => p.type === "text") as any
+      if (!textPart) {
+        textPart = {
+          id: id("part"),
+          type: "text",
+          text: "",
+          sessionID: session.id,
+          messageID: assistant.info.id,
+        }
+        assistant.parts.push(textPart)
+      }
+      textPart.text = text
+      emit(session.directory, "message.part.updated", { part: { ...textPart } })
+    }
+    if (lastAssistant.errorMessage || lastAssistant.error) {
+      assistant.info.error = lastAssistant.errorMessage || lastAssistant.error
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function applySessionModel(session: BridgeSession, model: { providerID: string; modelID: string }) {
+  if (!modelRuntime) await initKernel()
+  let resolved = typeof modelRuntime.getModel === "function" ? modelRuntime.getModel(model.providerID, model.modelID) : undefined
+  if (!resolved) {
+    // Custom provider may have been added after boot; refresh models.json + runtime once.
+    await reloadModelRuntime()
+    resolved = typeof modelRuntime.getModel === "function" ? modelRuntime.getModel(model.providerID, model.modelID) : undefined
+  }
+  if (!resolved) {
+    throw new Error(
+      `Model not found: ${model.providerID}/${model.modelID}. Re-save the custom provider or pick another model.`,
+    )
+  }
+  if (session.pi && typeof (session.pi as any).setModel === "function") {
+    await (session.pi as any).setModel(resolved)
+  }
+  session.model = model
 }
 
 export async function abortSession(sessionID: string) {
@@ -506,12 +601,19 @@ function handlePiEvent(session: BridgeSession, event: any) {
   if (!assistant) return
 
   // message_update with assistant text deltas
-  if (type === "message_update" || type === "message_delta" || event?.assistantMessageEvent) {
+  if (
+    type === "message_update" ||
+    type === "message_delta" ||
+    type === "message_start" ||
+    event?.assistantMessageEvent ||
+    event?.type === "text_delta"
+  ) {
     const delta =
       event?.assistantMessageEvent?.delta ||
       event?.delta ||
       event?.text ||
-      (typeof event?.message?.content === "string" ? event.message.content : undefined)
+      (typeof event?.message?.content === "string" ? event.message.content : undefined) ||
+      extractText(event?.message || event?.assistantMessage)
     if (typeof delta === "string" && delta.length > 0) {
       let textPart = assistant.parts.find((p) => p.type === "text") as any
       if (!textPart) {
@@ -524,8 +626,8 @@ function handlePiEvent(session: BridgeSession, event: any) {
         }
         assistant.parts.push(textPart)
       }
-      // Some events send full content; prefer append delta when short incremental
-      if (event?.assistantMessageEvent?.type === "text_delta" || event?.type === "message_update") {
+      const evtType = event?.assistantMessageEvent?.type || event?.type
+      if (evtType === "text_delta" || type === "message_update" || type === "message_delta") {
         textPart.text = String(textPart.text || "") + delta
       } else if (delta.length >= String(textPart.text || "").length) {
         textPart.text = delta
@@ -545,33 +647,7 @@ function handlePiEvent(session: BridgeSession, event: any) {
   }
 
   if (type === "message_end" || type === "turn_end" || type === "agent_end") {
-    // rebuild from agent state messages if available
-    try {
-      const msgs = session.pi?.agent?.state?.messages ?? []
-      const lastAssistant = [...msgs].reverse().find((m: any) => m.role === "assistant")
-      if (lastAssistant) {
-        const text = extractText(lastAssistant)
-        if (text) {
-          let textPart = assistant.parts.find((p) => p.type === "text") as any
-          if (!textPart) {
-            textPart = {
-              id: id("part"),
-              type: "text",
-              text: "",
-              sessionID: session.id,
-              messageID: assistant.info.id,
-            }
-            assistant.parts.push(textPart)
-          }
-          textPart.text = text
-          emit(session.directory, "message.part.updated", { part: { ...textPart } })
-        }
-        if (lastAssistant.error) assistant.info.error = lastAssistant.error
-      }
-    } catch {
-      // ignore
-    }
-    assistant.info.time.completed = Date.now()
+    harvestAssistantText(session, assistant)
     emit(session.directory, "message.updated", { info: assistant.info, parts: assistant.parts })
   }
 

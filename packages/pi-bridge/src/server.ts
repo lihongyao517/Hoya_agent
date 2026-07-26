@@ -14,7 +14,9 @@ import {
   listProviders,
   promptSession,
   publicSession,
+  revertSession,
   setProviderAuth,
+  unrevertSession,
   updateBridgeConfig,
   updateSession,
 } from "./session-store"
@@ -22,6 +24,7 @@ import { connectedEvent, subscribe, type GlobalEvent } from "./events"
 import { loadConfig } from "./config-store"
 import { discoverOpenAIModels } from "./discover-models"
 import { verifyProviderKey } from "./verify-api-key"
+import { botStatus, botWebhook, pollWeixinInstall, saveBotConfig, startBotRuntime, startWeixinInstall, stopBotRuntime } from "./bot-runtime"
 
 export type ListenOptions = {
   port: number
@@ -63,10 +66,28 @@ function readBody(req: http.IncomingMessage) {
   })
 }
 
-function directoryOf(req: http.IncomingMessage, url: URL) {
+function decodeDirectory(value: unknown) {
+  if (typeof value !== "string" || !value) return
+  let current = value
+  for (let i = 0; i < 3; i++) {
+    try {
+      const next = decodeURIComponent(current)
+      if (next === current) break
+      current = next
+    } catch {
+      break
+    }
+  }
+  return current
+}
+
+function directoryOf(req: http.IncomingMessage, url: URL, body?: any) {
   return (
-    url.searchParams.get("directory") ||
-    (req.headers["x-opencode-directory"] as string | undefined) ||
+    decodeDirectory(body?.location?.directory) ||
+    decodeDirectory(body?.directory) ||
+    decodeDirectory(url.searchParams.get("location[directory]")) ||
+    decodeDirectory(url.searchParams.get("directory")) ||
+    decodeDirectory(req.headers["x-opencode-directory"]) ||
     defaultDirectory()
   )
 }
@@ -191,6 +212,24 @@ export async function listen(options: ListenOptions) {
         return json(res, 200, next)
       }
 
+      // Multi-channel mobile bot gateway (QQ / Feishu / Lark / WeChat)
+      if (pathname === "/bot/status" && req.method === "GET") return json(res, 200, botStatus())
+      if (pathname === "/bot/config" && req.method === "GET") return json(res, 200, (await loadConfig()).bot ?? {})
+      if (pathname === "/bot/config" && (req.method === "POST" || req.method === "PATCH")) {
+        return json(res, 200, await saveBotConfig(await readBody(req)))
+      }
+      if (pathname === "/bot/start" && req.method === "POST") return json(res, 200, await startBotRuntime())
+      if (pathname === "/bot/stop" && req.method === "POST") return json(res, 200, await stopBotRuntime())
+      if (pathname === "/bot/weixin/install" && req.method === "POST") return json(res, 200, await startWeixinInstall())
+      if (pathname.startsWith("/bot/weixin/install/") && req.method === "GET") {
+        return json(res, 200, await pollWeixinInstall(decodeURIComponent(pathname.slice("/bot/weixin/install/".length))))
+      }
+      if (pathname.startsWith("/bot/webhook/") && req.method === "POST") {
+        const [, , , provider, id = provider] = pathname.split("/")
+        const result = await botWebhook(provider, decodeURIComponent(id), await readBody(req))
+        return json(res, result.status, result.body)
+      }
+
       // Discover OpenAI-compatible models (custom provider one-click fetch)
       if (pathname === "/provider/discover" && req.method === "POST") {
         const body = await readBody(req)
@@ -252,6 +291,12 @@ export async function listen(options: ListenOptions) {
         await setProviderAuth(providerID, key)
         return json(res, 200, { success: true })
       }
+      if (pathname.startsWith("/auth/") && req.method === "DELETE") {
+        const providerID = decodeURIComponent(pathname.slice("/auth/".length))
+        const { removeAuthProvider } = await import("./config-store")
+        await removeAuthProvider(providerID)
+        return json(res, 200, true)
+      }
 
       // Session status
       if (pathname === "/session/status" && req.method === "GET") {
@@ -273,7 +318,7 @@ export async function listen(options: ListenOptions) {
       }
       if (pathname === "/session" && req.method === "POST") {
         const body = await readBody(req)
-        const directory = directoryOf(req, url)
+        const directory = directoryOf(req, url, body)
         const session = await createSession({
           directory,
           title: body.title,
@@ -315,16 +360,25 @@ export async function listen(options: ListenOptions) {
         }
         if ((rest === "/message" || rest === "/prompt_async") && req.method === "POST") {
           const body = await readBody(req)
+          const promptDirectory = directoryOf(req, url, body)
           const result = await promptSession(sessionID, {
             messageID: body.messageID,
             parts: body.parts,
             agent: body.agent,
             model: body.model,
-            directory,
+            directory: promptDirectory,
           })
           // prompt_async returns quickly; message endpoint historically returned message
           if (rest === "/prompt_async") return json(res, 200, true)
           return json(res, 200, result)
+        }
+        if (rest === "/revert" && req.method === "POST") {
+          const body = await readBody(req)
+          if (!body.messageID) return json(res, 400, { error: "missing messageID" })
+          return json(res, 200, await revertSession(sessionID, String(body.messageID), directoryOf(req, url, body)))
+        }
+        if (rest === "/unrevert" && req.method === "POST") {
+          return json(res, 200, await unrevertSession(sessionID, directory))
         }
         if (rest === "/abort" && req.method === "POST") {
           if (getSession(sessionID)) await abortSession(sessionID)
@@ -346,12 +400,49 @@ export async function listen(options: ListenOptions) {
       }
       if (pathname === "/api/session" && req.method === "POST") {
         const body = await readBody(req)
-        const directory = body?.location?.directory || directoryOf(req, url)
-        const session = await createSession({ directory, id: body.id, model: body.model })
+        const directory = directoryOf(req, url, body)
+        const model = body.model?.modelID ? body.model : body.model?.id ? { providerID: body.model.providerID, modelID: body.model.id } : undefined
+        const session = await createSession({ directory, id: body.id, model })
         return json(res, 200, { data: publicSession(session) })
+      }
+      if (pathname === "/api/session/active" && req.method === "GET") {
+        return json(
+          res,
+          200,
+          Object.fromEntries(allSessions().filter((s) => s.status !== "idle").map((s) => [s.id, { type: "running" }])),
+        )
+      }
+      const apiSessionMatch = pathname.match(/^\/api\/session\/([^/]+)(.*)$/)
+      if (apiSessionMatch) {
+        const sessionID = decodeURIComponent(apiSessionMatch[1])
+        const rest = apiSessionMatch[2] || ""
+        const directory = directoryOf(req, url)
+        if (rest === "" && req.method === "GET") {
+          const session = await ensureSession(sessionID, directory)
+          return json(res, 200, { data: publicSession(session) })
+        }
+        if (rest === "/abort" && req.method === "POST") {
+          if (getSession(sessionID)) await abortSession(sessionID)
+          return json(res, 200, true)
+        }
+        if (rest === "/revert/stage" && req.method === "POST") {
+          const body = await readBody(req)
+          if (!body.messageID) return json(res, 400, { error: "missing messageID" })
+          return json(res, 200, { data: await revertSession(sessionID, String(body.messageID), directoryOf(req, url, body)) })
+        }
+        if (rest === "/revert/clear" && req.method === "POST") {
+          return json(res, 200, { data: await unrevertSession(sessionID, directory) })
+        }
+        if (rest === "/revert/commit" && req.method === "POST") {
+          const session = await ensureSession(sessionID, directory)
+          return json(res, 200, { data: publicSession(session) })
+        }
       }
       if (pathname === "/api/provider" && req.method === "GET") {
         return json(res, 200, await listProviders())
+      }
+      if (pathname === "/api/agent" && req.method === "GET") {
+        return json(res, 200, { data: [{ name: "build", mode: "primary", description: "Pi coding agent", permission: [], options: {} }] })
       }
 
       // Global dispose (credential reload)
@@ -412,11 +503,13 @@ export async function listen(options: ListenOptions) {
   })
 
   console.log(`[pi-bridge] listening on http://${hostname}:${options.port} (kernel=pi)`)
+  await startBotRuntime()
 
   return {
     url: `http://${hostname}:${options.port}`,
     server,
     async stop(close = true) {
+      await stopBotRuntime()
       if (!close) return
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()))

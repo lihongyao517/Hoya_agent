@@ -76,13 +76,12 @@ export function CustomProviderForm(props: { autofocus?: boolean } = {}) {
       )
       const sdk = serverSDK()
       const http = sdk.server.http
-      const auth =
-        http?.password
-          ? {
-              Authorization: `Basic ${btoa(`${http.username ?? "opencode"}:${http.password}`)}`,
-            }
-          : {}
-            const response = await (platform.fetch ?? fetch)(`${(http?.url ?? sdk.url).replace(/\/$/, "")}/provider/discover`, {
+      const auth: Record<string, string> = http?.password
+        ? {
+            Authorization: `Basic ${btoa(`${http.username ?? "opencode"}:${http.password}`)}`,
+          }
+        : {}
+      const response = await (platform.fetch ?? fetch)(`${(http?.url ?? sdk.url).replace(/\/$/, "")}/provider/discover`, {
         method: "POST",
         headers: { "content-type": "application/json", ...auth },
         body: JSON.stringify({
@@ -237,7 +236,7 @@ export function CustomProviderForm(props: { autofocus?: boolean } = {}) {
         // Verify connectivity before saving config.
         const sdk = serverSDK()
         const http = sdk.server.http
-        const authHdr = http?.password
+        const authHdr: Record<string, string> = http?.password
           ? { Authorization: `Basic ${btoa(`${http.username ?? "opencode"}:${http.password}`)}` }
           : {}
         const resp = await (platform.fetch ?? fetch)(`${(http?.url ?? sdk.url).replace(/\/$/, "")}/provider/verify`, {

@@ -11,6 +11,7 @@ import { SettingsModelsV2 } from "./models"
 import "./settings-v2.css"
 import { SettingsServersV2 } from "./servers"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
+import { SettingsBotsV2 } from "./bots"
 
 export const DialogSettings: Component<{
   sessionID?: string
@@ -67,6 +68,10 @@ export const DialogSettings: Component<{
                       <Icon name="models" />
                       {language.t("settings.models.title")}
                     </TabsV2.Trigger>
+                    <TabsV2.Trigger value="bots">
+                      <Icon name="server" />
+                      手机机器人
+                    </TabsV2.Trigger>
                   </div>
                 </div>
               </div>
@@ -91,6 +96,9 @@ export const DialogSettings: Component<{
         </TabsV2.Content>
         <TabsV2.Content value="models" class="settings-v2-panel">
           <SettingsModelsV2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="bots" class="settings-v2-panel">
+          <SettingsBotsV2 />
         </TabsV2.Content>
       </TabsV2>
     </Dialog>
