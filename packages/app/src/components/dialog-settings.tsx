@@ -1,4 +1,4 @@
-import { Component, createSignal, startTransition } from "solid-js"
+import { Component, createSignal, lazy, startTransition } from "solid-js"
 import { Dialog } from "@opencode-ai/ui/dialog"
 import { Tabs } from "@opencode-ai/ui/tabs"
 import { Icon } from "@opencode-ai/ui/icon"
@@ -10,6 +10,8 @@ import { SettingsKeybinds } from "./settings-keybinds"
 import { SettingsProviders } from "./settings-providers"
 import { SettingsModels } from "./settings-models"
 import { SettingsServers } from "./settings-servers"
+import { SettingsBotsV2 } from "./settings-v2/bots"
+import { SettingsDebugLogs } from "./settings-debug-logs"
 
 export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
   const language = useLanguage()
@@ -63,6 +65,14 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
                       <Icon name="models" />
                       {language.t("settings.models.title")}
                     </Tabs.Trigger>
+                    <Tabs.Trigger value="bots">
+                      <Icon name="server" />
+                      手机机器人
+                    </Tabs.Trigger>
+                    <Tabs.Trigger value="debug">
+                      <Icon name="sliders" />
+                      运行日志
+                    </Tabs.Trigger>
                   </div>
                 </div>
               </div>
@@ -87,6 +97,12 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
         </Tabs.Content>
         <Tabs.Content value="models" class="no-scrollbar">
           <SettingsModels />
+        </Tabs.Content>
+        <Tabs.Content value="bots" class="no-scrollbar">
+          <SettingsBotsV2 />
+        </Tabs.Content>
+        <Tabs.Content value="debug" class="no-scrollbar">
+          <SettingsDebugLogs />
         </Tabs.Content>
       </Tabs>
     </Dialog>

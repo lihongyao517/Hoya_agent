@@ -25,6 +25,7 @@ import { loadConfig } from "./config-store"
 import { discoverOpenAIModels } from "./discover-models"
 import { verifyProviderKey } from "./verify-api-key"
 import { botStatus, botWebhook, pollWeixinInstall, saveBotConfig, startBotRuntime, startWeixinInstall, stopBotRuntime } from "./bot-runtime"
+import { getLogs, clearLogs, log } from "./logger"
 
 export type ListenOptions = {
   port: number
@@ -131,6 +132,11 @@ export async function listen(options: ListenOptions) {
       const url = new URL(req.url || "/", `http://${host}`)
       const pathname = url.pathname
 
+      // Log every request for the debug panel
+      if (pathname !== "/debug/logs" && pathname !== "/global/event" && pathname !== "/event" && pathname !== "/api/event") {
+        log.debug("http", `${req.method} ${pathname}`)
+      }
+
       const isHealth = pathname === "/api/health" || pathname === "/global/health"
       if (!isHealth && !checkAuth(req, username, password)) {
         return json(res, 401, { error: "unauthorized" })
@@ -175,26 +181,30 @@ export async function listen(options: ListenOptions) {
       // Project
       if (pathname === "/project" && req.method === "GET") {
         const directory = directoryOf(req, url)
+        const now = Date.now()
         return json(res, 200, [
           {
             id: Buffer.from(directory).toString("hex").slice(0, 32),
             worktree: directory,
             name: path.basename(directory) || directory,
+            time: { created: now, updated: now },
           },
         ])
       }
       if (pathname === "/project/current" && req.method === "GET") {
         const directory = directoryOf(req, url)
+        const now = Date.now()
         return json(res, 200, {
           id: Buffer.from(directory).toString("hex").slice(0, 32),
           worktree: directory,
           name: path.basename(directory) || directory,
+          time: { created: now, updated: now },
         })
       }
 
       // Config
       if ((pathname === "/config" || pathname === "/global/config") && req.method === "GET") {
-        const config = await loadConfig()
+        const config = await loadConfig(true)
         return json(res, 200, {
           $schema: "https://hoyaagent.local/config.json",
           username: "hoya",
@@ -209,12 +219,16 @@ export async function listen(options: ListenOptions) {
         const body = await readBody(req)
         const patch = body?.config && typeof body.config === "object" ? body.config : body
         const next = await updateBridgeConfig(patch ?? {})
+        // Notify frontend to refetch providers/config after credential or provider changes.
+        const { emit: emitEvent } = await import("./events")
+        emitEvent("", "global.disposed", {})
+        emitEvent(defaultDirectory(), "global.disposed", {})
         return json(res, 200, next)
       }
 
       // Multi-channel mobile bot gateway (QQ / Feishu / Lark / WeChat)
       if (pathname === "/bot/status" && req.method === "GET") return json(res, 200, botStatus())
-      if (pathname === "/bot/config" && req.method === "GET") return json(res, 200, (await loadConfig()).bot ?? {})
+      if (pathname === "/bot/config" && req.method === "GET") return json(res, 200, (await loadConfig(true)).bot ?? {})
       if (pathname === "/bot/config" && (req.method === "POST" || req.method === "PATCH")) {
         return json(res, 200, await saveBotConfig(await readBody(req)))
       }
@@ -289,6 +303,9 @@ export async function listen(options: ListenOptions) {
         const key = body?.auth?.key || body?.key || body?.apiKey
         if (!key) return json(res, 400, { error: "missing api key" })
         await setProviderAuth(providerID, key)
+        const { emit: emitEvent } = await import("./events")
+        emitEvent("", "global.disposed", {})
+        emitEvent(defaultDirectory(), "global.disposed", {})
         return json(res, 200, { success: true })
       }
       if (pathname.startsWith("/auth/") && req.method === "DELETE") {
@@ -310,10 +327,8 @@ export async function listen(options: ListenOptions) {
 
       // Sessions collection
       if (pathname === "/session" && req.method === "GET") {
-        const directory = directoryOf(req, url)
-        const list = allSessions()
-          .filter((s) => !directory || s.directory === directory)
-          .map(publicSession)
+        // Return all sessions regardless of directory filter to avoid mismatch
+        const list = allSessions().map(publicSession)
         return json(res, 200, list)
       }
       if (pathname === "/session" && req.method === "POST") {
@@ -471,7 +486,7 @@ export async function listen(options: ListenOptions) {
       if (pathname === "/experimental/tool/ids" && req.method === "GET") return json(res, 200, [])
       if (pathname === "/experimental/session" && req.method === "GET") {
         const list = allSessions().map(publicSession)
-        return json(res, 200, { data: list, cursor: {} })
+        return json(res, 200, list)
       }
       if (pathname.startsWith("/experimental/session/") && req.method === "GET") return json(res, 200, {})
       if (pathname === "/experimental/workspace" && req.method === "GET") return json(res, 200, [])
@@ -488,8 +503,89 @@ export async function listen(options: ListenOptions) {
       if (pathname.startsWith("/experimental/")) return json(res, 200, {})
       if (pathname === "/policies" && req.method === "GET") return json(res, 200, [])
 
+      // Debug endpoints for the settings log panel
+      if (pathname === "/debug/logs" && req.method === "GET") {
+        const limit = Number(url.searchParams.get("limit")) || 200
+        return json(res, 200, { logs: getLogs(limit) })
+      }
+      if (pathname === "/debug/logs" && req.method === "DELETE") {
+        clearLogs()
+        return json(res, 200, { cleared: true })
+      }
+      if (pathname === "/debug/status" && req.method === "GET") {
+        const { allSessions: allSess, getSession: getSess } = await import("./session-store")
+        const sessions = allSess()
+        return json(res, 200, {
+          kernel: "pi",
+          version: "1.18.4-pi",
+          uptime: process.uptime(),
+          memory: process.memoryUsage(),
+          sessions: sessions.map((s) => ({
+            id: s.id,
+            title: s.title,
+            status: s.status,
+            model: s.model,
+            hasPi: Boolean(s.pi),
+            messageCount: s.messages.length,
+          })),
+          bot: botStatus(),
+        })
+      }
+      if (pathname === "/debug/sessions" && req.method === "DELETE") {
+        const { allSessions: allSess, deleteSession: delSession } = await import("./session-store")
+        const ids = allSess().map((s) => s.id)
+        for (const sid of ids) delSession(sid)
+        log.info("debug", `Deleted all ${ids.length} sessions`)
+        return json(res, 200, { deleted: ids.length })
+      }
+      if (pathname.startsWith("/debug/sessions/") && req.method === "DELETE") {
+        const sid = decodeURIComponent(pathname.slice("/debug/sessions/".length))
+        const { deleteSession: delSession } = await import("./session-store")
+        delSession(sid)
+        log.info("debug", `Deleted session ${sid}`)
+        return json(res, 200, { deleted: sid })
+      }
+      if (pathname === "/debug/test-api" && req.method === "POST") {
+        const body = await readBody(req)
+        const providerID = body.providerID || "nvida"
+        const modelID = body.modelID || "z-ai/glm-5.2"
+        try {
+          const { loadAuthFile } = await import("./config-store")
+          const auth = await loadAuthFile()
+          const fs = await import("node:fs/promises")
+          const nodePath = await import("node:path")
+          const home = process.env.HOYA_HOME || nodePath.join(os.homedir(), ".hoya")
+          const modelsJsonRaw = await fs.readFile(nodePath.join(home, "pi-agent", "models.json"), "utf8").catch(() => "{}")
+          const modelsJson = JSON.parse(modelsJsonRaw)
+          const providerConf = modelsJson?.providers?.[providerID]
+          const apiKey = auth[providerID]?.key || providerConf?.apiKey || ""
+          const baseUrl = providerConf?.baseUrl || ""
+          log.info("debug", `test-api: provider=${providerID}, model=${modelID}, baseUrl=${baseUrl}, keyLen=${apiKey.length}`)
+          if (!baseUrl) return json(res, 400, { error: `No baseUrl found for provider ${providerID}` })
+          if (!apiKey) return json(res, 400, { error: `No API key found for provider ${providerID}` })
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 15000)
+          const fetchStart = Date.now()
+          const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+            body: JSON.stringify({ model: modelID, messages: [{ role: "user", content: "Say hi" }], max_tokens: 10, stream: false }),
+            signal: controller.signal,
+          })
+          clearTimeout(timeout)
+          const elapsed = Date.now() - fetchStart
+          const responseBody = await response.text()
+          log.info("debug", `test-api: status=${response.status}, elapsed=${elapsed}ms, body=${responseBody.slice(0, 500)}`)
+          return json(res, 200, { status: response.status, elapsed, baseUrl, model: modelID, keyPreview: `${apiKey.slice(0, 8)}...${apiKey.slice(-4)}`, body: responseBody.slice(0, 1000) })
+        } catch (error) {
+          log.error("debug", `test-api failed: ${error}`)
+          return json(res, 200, { error: error instanceof Error ? error.message : String(error) })
+        }
+      }
+
       return json(res, 404, { error: "not found", path: pathname })
     } catch (error) {
+      log.error("http", `500 on ${req.method} ${req.url}: ${error instanceof Error ? error.message : String(error)}`)
       console.error("[pi-bridge]", error)
       return json(res, 500, {
         error: error instanceof Error ? error.message : String(error),

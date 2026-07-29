@@ -154,6 +154,9 @@ export const SettingsGeneralV2: Component<{
 
     const options = [
       autoOption,
+      { id: "powershell", value: "powershell", label: "PowerShell" },
+      { id: "bash", value: "bash", label: "Bash" },
+      { id: "cmd", value: "cmd", label: "Command Prompt (cmd)" },
       ...list.map((s) => {
         const ambiguousName = (nameCounts.get(s.name) || 0) > 1
         const text = ambiguousName ? s.path : s.name

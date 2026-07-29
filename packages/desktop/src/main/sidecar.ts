@@ -134,7 +134,44 @@ function useSystemCertificates() {
 
 function useEnvProxy() {
   try {
-    ;(http as NodeHttpWithEnvProxy).setGlobalProxyFromEnv()
+    // If no proxy env vars are set, try to detect Windows system proxy
+    if (!process.env.HTTP_PROXY && !process.env.http_proxy && !process.env.HTTPS_PROXY && !process.env.https_proxy) {
+      try {
+        const { execSync } = require("node:child_process")
+        const output = execSync(
+          'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable & reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer',
+          { encoding: "utf8", timeout: 3000 },
+        )
+        const enableMatch = output.match(/ProxyEnable\s+REG_DWORD\s+0x(\d+)/i)
+        const serverMatch = output.match(/ProxyServer\s+REG_SZ\s+(.+)/i)
+        if (enableMatch && parseInt(enableMatch[1], 16) === 1 && serverMatch) {
+          const proxy = serverMatch[1].trim()
+          const proxyUrl = proxy.includes("://") ? proxy : `http://${proxy}`
+          process.env.HTTP_PROXY = proxyUrl
+          process.env.HTTPS_PROXY = proxyUrl
+          process.env.http_proxy = proxyUrl
+          process.env.https_proxy = proxyUrl
+          console.log(`[sidecar] detected Windows system proxy: ${proxyUrl}`)
+        }
+      } catch {
+        // Registry query failed, continue without proxy
+      }
+    }
+
+    // Set up proxy for http/https modules (Electron API)
+    ;(http as NodeHttpWithEnvProxy).setGlobalProxyFromEnv?.()
+
+    // Set up proxy for global fetch() / undici
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
+    if (proxyUrl) {
+      try {
+        const { ProxyAgent, setGlobalDispatcher } = require("undici")
+        setGlobalDispatcher(new ProxyAgent(proxyUrl))
+        console.log(`[sidecar] undici global dispatcher set to proxy: ${proxyUrl}`)
+      } catch (undiciErr) {
+        console.warn("[sidecar] failed to set undici proxy (fetch may not use proxy):", undiciErr)
+      }
+    }
   } catch (error) {
     console.warn("failed to load proxy environment", error)
   }

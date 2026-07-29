@@ -134,6 +134,23 @@ describe("applyGlobalEvent", () => {
 })
 
 describe("applyDirectoryEvent", () => {
+  test("renders a stream delta once when the bridge initializes an empty part", () => {
+    const [store, setStore] = createStore(baseState({ part: { message: [] } }))
+    const apply = (event: { type: string; properties: Record<string, unknown> }) =>
+      applyDirectoryEvent({ event, store, setStore, push() {}, directory: "/tmp", loadLsp() {} })
+
+    // The Pi bridge must send an empty part update followed by deltas. Sending
+    // a full `text: "hello"` update before the delta would render "hellohello".
+    apply({ type: "message.part.updated", properties: { part: { ...textPart("part", "session", "message"), text: "" } } })
+    apply({
+      type: "message.part.delta",
+      properties: { sessionID: "session", messageID: "message", partID: "part", field: "text", delta: "hello" },
+    })
+    apply({ type: "message.part.updated", properties: { part: { ...textPart("part", "session", "message"), text: "hello" } } })
+
+    expect((store.part.message?.[0] as { text: string }).text).toBe("hello")
+  })
+
   test("initializes text delta accumulation from the current part text", () => {
     const part = { ...textPart("part", "session", "message"), text: "existing" }
     const [store, setStore] = createStore(baseState({ part: { message: [part] } }))

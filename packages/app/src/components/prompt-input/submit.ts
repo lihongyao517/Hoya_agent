@@ -20,6 +20,7 @@ import { setCursorPosition } from "./editor-dom"
 import { formatServerError } from "@/utils/server-errors"
 import { ScopedKey } from "@/utils/server-scope"
 import { createPromptSubmissionState } from "./submission-state"
+import { logClientError } from "@/utils/toast"
 
 type PendingPrompt = {
   abort: AbortController
@@ -362,7 +363,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       input.onNewSessionWorktreeReset?.()
     }
 
-    let session = input.info()
+    let session: Session | undefined = input.info() as Session | undefined
     if (!session && isNewSession) {
       const created = await client.session
         .create()
@@ -393,7 +394,27 @@ export function createPromptSubmit(input: PromptSubmitInput) {
         })
       }
     }
+    // The session list is intentionally cache-backed. After an SSE reconnect or
+    // a renderer reload that cache can briefly be empty even though the Pi
+    // bridge still owns the session. Resolve it once before showing an error.
+    if (!session && params.id) {
+      try {
+        session = await serverSync().session.resolve(params.id)
+        seed(session.directory || sessionDirectory, session)
+      } catch (error) {
+        logClientError("Failed to restore the active session before sending a prompt", {
+          sessionID: params.id,
+          directory: sessionDirectory,
+          error: errorMessage(error),
+        })
+      }
+    }
     if (!session) {
+      logClientError("Prompt send aborted because the active session was unavailable", {
+        sessionID: params.id,
+        directory: sessionDirectory,
+        isNewSession,
+      })
       showToast({
         title: language.t("prompt.toast.promptSendFailed.title"),
         description: language.t("prompt.toast.promptSendFailed.description"),

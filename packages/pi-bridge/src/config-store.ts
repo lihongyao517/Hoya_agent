@@ -104,8 +104,12 @@ function authPath() {
 
 let cache: BridgeConfig | undefined
 
-export async function loadConfig(): Promise<BridgeConfig> {
-  if (cache) return cache
+export function invalidateConfigCache() {
+  cache = undefined
+}
+
+export async function loadConfig(forceReload = false): Promise<BridgeConfig> {
+  if (cache && !forceReload) return cache
   try {
     const raw = await fs.readFile(configPath(), "utf8")
     cache = JSON.parse(raw) as BridgeConfig
